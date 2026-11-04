@@ -1,0 +1,6 @@
+{
+  "name": "Medo Next",
+  "description": "High-performance offline medical board exam preparation, spaced repetition (SM-2), exam simulator, and rich clinical lesson & mind-map reader.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

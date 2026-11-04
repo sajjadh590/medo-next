@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">Medo Next</string>
+    <string name="nav_home">خانه</string>
+    <string name="nav_practice">تمرین</string>
+    <string name="nav_exam">آزمون</string>
+    <string name="nav_review">مرور</string>
+    <string name="nav_analytics">آمار</string>
+    <string name="settings_title">تنظیمات</string>
+    <string name="pack_manager_title">مدیریت بسته‌ها و انتقال</string>
+    <string name="diagnostics_title">گزارش و عیب‌یابی</string>
+    <string name="pdf_export_title">خروجی PDF</string>
+</resources>

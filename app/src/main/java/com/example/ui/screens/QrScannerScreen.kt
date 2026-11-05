@@ -29,24 +29,21 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
-import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.QrCodeScanner
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -90,14 +87,12 @@ import java.util.concurrent.Executors
 
 /**
  * Full-Screen CameraX + ZXing QR Scanner Screen (Section A.1, A.2, A.3):
- * - CameraX Preview + ImageAnalysis (STRATEGY_KEEP_ONLY_LATEST, ~1280x720, ~10 fps throttle)
- * - Torch toggle, continuous autofocus + tap-to-focus + pinch zoom
- * - Visible square viewfinder frame
- * - 10-second no-detection hint («گوشی را کمی نزدیک‌تر یا دورتر ببرید و نور صفحه رایانه را بیشتر کنید»)
- * - On detection: vibrates, freezes frame, validates private LAN URL, displays decoded address + «اتصال» button
- * - Permission rationale + denied state + button to open system app settings
- * - Fallbacks: Manual IP:Port + PIN input, Pick QR image from gallery (Android Photo Picker), Paste from clipboard
+ * - Immediately unbinds CameraX (`cameraProvider.unbindAll()`) and clears the image analyzer
+ *   whenever the user closes the QR screen OR a QR code is detected and frozen, so the Android
+ *   green camera privacy indicator in the notification bar turns off immediately.
+ * - Uses adaptive `FlowRow` and flexible height buttons so fallback boxes always fit their Persian text cleanly.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun QrScannerModalScreen(
     forcePermissionDeniedForTest: Boolean = false,
@@ -107,6 +102,18 @@ fun QrScannerModalScreen(
     val tokens = LocalMedoTheme.current
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+
+    // Guarantee that closing QrScannerModalScreen ALWAYS unbinds CameraX so the green camera indicator turns off
+    DisposableEffect(Unit) {
+        onDispose {
+            releaseCameraProviderSafely(context)
+        }
+    }
+
+    val closeAndReleaseCamera = {
+        releaseCameraProviderSafely(context)
+        onClose()
+    }
 
     var hasCameraPermission by remember(forcePermissionDeniedForTest) {
         mutableStateOf(
@@ -188,7 +195,7 @@ fun QrScannerModalScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(tokens.gradientStart)
-            .padding(16.dp)
+            .padding(horizontal = 16.dp, vertical = 12.dp)
             .testTag("qr_scanner_screen"),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -198,8 +205,14 @@ fun QrScannerModalScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onClose, modifier = Modifier.testTag("close_qr_scanner_btn")) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                IconButton(
+                    onClick = closeAndReleaseCamera,
+                    modifier = Modifier.testTag("close_qr_scanner_btn")
+                ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                         contentDescription = "بازگشت",
@@ -214,7 +227,7 @@ fun QrScannerModalScreen(
                 )
             }
 
-            if (hasCameraPermission) {
+            if (hasCameraPermission && frozenDetectedRaw == null) {
                 IconButton(
                     onClick = { torchEnabled = !torchEnabled },
                     modifier = Modifier.testTag("qr_torch_toggle_btn")
@@ -232,6 +245,7 @@ fun QrScannerModalScreen(
         Box(
             modifier = Modifier
                 .weight(1f)
+                .heightIn(min = 220.dp)
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(24.dp))
                 .border(1.5.dp, tokens.accent.copy(alpha = 0.5f), RoundedCornerShape(24.dp))
@@ -243,6 +257,7 @@ fun QrScannerModalScreen(
                     torchEnabled = torchEnabled,
                     onQrDetected = { rawText ->
                         if (frozenDetectedRaw == null) {
+                            releaseCameraProviderSafely(context)
                             handleCandidateQrPayload(
                                 context = context,
                                 rawPayload = rawText,
@@ -293,7 +308,7 @@ fun QrScannerModalScreen(
                 GlassCard(
                     isReadingSurface = true,
                     modifier = Modifier
-                        .padding(20.dp)
+                        .padding(16.dp)
                         .fillMaxWidth()
                         .testTag("qr_permission_rationale_card")
                 ) {
@@ -305,7 +320,7 @@ fun QrScannerModalScreen(
                             imageVector = Icons.Default.QrCodeScanner,
                             contentDescription = null,
                             tint = tokens.accent,
-                            modifier = Modifier.size(48.dp)
+                            modifier = Modifier.size(44.dp)
                         )
                         Text(
                             text = "مجوز دوربین برای اسکن کد QR شبکه محلی",
@@ -314,13 +329,14 @@ fun QrScannerModalScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "برنامه فقط برای خواندن کد QR نمایش‌داده‌شده در صفحه رایانه شما از دوربین استفاده می‌کند. هیچ تصویری ذخیره یا ارسال نمی‌شود.",
+                            text = "برنامه فقط برای خواندن کد QR نمایش‌داده‌شده در صفحه رایانه شما از دوربین استفاده می‌کند و پس از بستن این صفحه دوربین بلافاصله خاموش می‌شود.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = tokens.textSecondary
                         )
 
-                        Row(
+                        FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             MedoPrimaryButton(
@@ -356,13 +372,13 @@ fun QrScannerModalScreen(
                 GlassCard(
                     isReadingSurface = true,
                     modifier = Modifier
-                        .padding(20.dp)
+                        .padding(16.dp)
                         .fillMaxWidth()
                         .testTag("qr_detected_frozen_card")
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(
-                            text = "✓ کد QR دریافت و تصویر ثابت شد",
+                            text = "✓ کد QR دریافت و دوربین متوقف شد",
                             style = MaterialTheme.typography.titleLarge,
                             color = tokens.correct,
                             fontWeight = FontWeight.Bold
@@ -386,8 +402,11 @@ fun QrScannerModalScreen(
                         ) {
                             if (validatedUrlReady != null) {
                                 MedoPrimaryButton(
-                                    text = "اتصال",
-                                    onClick = { onConnectValidatedUrl(validatedUrlReady!!) },
+                                    text = "اتصال و دریافت بانک",
+                                    onClick = {
+                                        releaseCameraProviderSafely(context)
+                                        onConnectValidatedUrl(validatedUrlReady!!)
+                                    },
                                     modifier = Modifier
                                         .weight(1f)
                                         .testTag("qr_connect_btn")
@@ -410,22 +429,21 @@ fun QrScannerModalScreen(
             }
         }
 
-        // Fallback Actions Row: Manual Address Entry, Gallery QR Image Picker, Clipboard Paste
+        // Fallback Actions Card: FlowRow so all 3 Persian pills fit their text comfortably without truncation
         GlassCard(
             contentPadding = PaddingValues(12.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(
+                FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     MedoPill(
                         text = "وارد کردن آدرس دستی",
                         onClick = { showManualEntry = !showManualEntry },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("fallback_manual_address_btn")
+                        modifier = Modifier.testTag("fallback_manual_address_btn")
                     )
                     MedoPill(
                         text = "انتخاب عکس QR از گالری",
@@ -434,9 +452,7 @@ fun QrScannerModalScreen(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                             )
                         },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("fallback_gallery_qr_btn")
+                        modifier = Modifier.testTag("fallback_gallery_qr_btn")
                     )
                     MedoPill(
                         text = "چسباندن از کلیپ‌بورد",
@@ -493,6 +509,7 @@ fun QrScannerModalScreen(
                                     validatedUrlReady = validUrl
                                     validationMessage = errMsg
                                     if (validUrl != null) {
+                                        releaseCameraProviderSafely(context)
                                         onConnectValidatedUrl(validUrl)
                                     }
                                 }
@@ -513,6 +530,29 @@ fun QrScannerModalScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * Unbinds all CameraX use cases from ProcessCameraProvider immediately so the Android OS
+ * green camera indicator dot in the notification / status bar turns off as soon as the QR tab closes.
+ */
+fun releaseCameraProviderSafely(context: Context) {
+    try {
+        val future = ProcessCameraProvider.getInstance(context)
+        if (future.isDone) {
+            future.get().unbindAll()
+            DiagnosticsLogger.logEvent("CAM_RELEASE", "دوربین آزاد شد (unbindAll)")
+        } else {
+            future.addListener({
+                try {
+                    future.get().unbindAll()
+                    DiagnosticsLogger.logEvent("CAM_RELEASE", "دوربین آزاد شد (async unbindAll)")
+                } catch (_: Exception) {
+                }
+            }, ContextCompat.getMainExecutor(context))
+        }
+    } catch (_: Exception) {
     }
 }
 
@@ -561,19 +601,42 @@ private fun CameraXQrPreview(
     val lifecycleOwner = LocalLifecycleOwner.current
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
     var activeCamera by remember { mutableStateOf<Camera?>(null) }
+    var cameraProviderRef by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var imageAnalysisRef by remember { mutableStateOf<ImageAnalysis?>(null) }
+    var isDisposed by remember { mutableStateOf(false) }
     var currentZoomRatio by remember { mutableFloatStateOf(1f) }
     var lastAnalyzedTimestampMs by remember { mutableStateOf(0L) }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(lifecycleOwner) {
+        isDisposed = false
         onDispose {
-            analysisExecutor.shutdown()
+            isDisposed = true
+            try {
+                activeCamera?.cameraControl?.enableTorch(false)
+            } catch (_: Exception) {
+            }
+            try {
+                imageAnalysisRef?.clearAnalyzer()
+            } catch (_: Exception) {
+            }
+            try {
+                cameraProviderRef?.unbindAll()
+            } catch (_: Exception) {
+            }
+            releaseCameraProviderSafely(context)
+            try {
+                analysisExecutor.shutdownNow()
+            } catch (_: Exception) {
+            }
         }
     }
 
     LaunchedEffect(activeCamera, torchEnabled) {
-        try {
-            activeCamera?.cameraControl?.enableTorch(torchEnabled)
-        } catch (_: Exception) {
+        if (!isDisposed) {
+            try {
+                activeCamera?.cameraControl?.enableTorch(torchEnabled)
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -588,6 +651,12 @@ private fun CameraXQrPreview(
             cameraProviderFuture.addListener({
                 try {
                     val cameraProvider = cameraProviderFuture.get()
+                    cameraProviderRef = cameraProvider
+                    if (isDisposed) {
+                        cameraProvider.unbindAll()
+                        return@addListener
+                    }
+
                     val preview = Preview.Builder().build().also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
@@ -597,10 +666,14 @@ private fun CameraXQrPreview(
                         .setTargetResolution(Size(1280, 720))
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build()
+                    imageAnalysisRef = imageAnalysis
 
                     imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                        if (isDisposed) {
+                            imageProxy.close()
+                            return@setAnalyzer
+                        }
                         val now = System.currentTimeMillis()
-                        // Throttle to ~10 frames per second (100ms interval) so UI never lags
                         if (now - lastAnalyzedTimestampMs >= 95L) {
                             lastAnalyzedTimestampMs = now
                             try {
@@ -621,8 +694,12 @@ private fun CameraXQrPreview(
                                         pixelStride = 1,
                                         rotationDegrees = imageProxy.imageInfo.rotationDegrees
                                     )
-                                    if (decoded != null) {
-                                        previewView.post { onQrDetected(decoded) }
+                                    if (decoded != null && !isDisposed) {
+                                        previewView.post {
+                                            if (!isDisposed) {
+                                                onQrDetected(decoded)
+                                            }
+                                        }
                                     }
                                 }
                             } catch (_: Exception) {
@@ -649,7 +726,6 @@ private fun CameraXQrPreview(
             .fillMaxSize()
             .pointerInput(Unit) {
                 detectTapGestures { tapOffset ->
-                    // Tap-to-focus
                     try {
                         val cam = activeCamera ?: return@detectTapGestures
                         val factory = androidx.camera.core.SurfaceOrientedMeteringPointFactory(
@@ -665,7 +741,6 @@ private fun CameraXQrPreview(
             }
             .pointerInput(Unit) {
                 detectTransformGestures { _, _, zoom, _ ->
-                    // Pinch zoom
                     try {
                         val cam = activeCamera ?: return@detectTransformGestures
                         val maxZoom = cam.cameraInfo.zoomState.value?.maxZoomRatio ?: 4f

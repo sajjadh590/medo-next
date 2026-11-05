@@ -90,6 +90,7 @@ import org.json.JSONArray
  * - Category Tree with two tabs («بانک من» and «همه دسته‌ها»), «باز کردن همه / بستن همه»,
  *   full-path disambiguation where category names repeat, and separate >= 48dp question count pill target.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun HomeScreen(
     state: MedoUiState,
@@ -312,12 +313,15 @@ fun HomeScreen(
         item {
             GlassCard(modifier = Modifier.fillMaxWidth()) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
+                    FlowRow(
                         horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
                             MedoPill(
                                 text = "بانک من",
                                 containerColor = if (state.onlyDownloadedTreeTab) tokens.accent else tokens.surfaceTint,
@@ -334,7 +338,10 @@ fun HomeScreen(
                             )
                         }
 
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
                             MedoPill(
                                 text = "باز کردن همه",
                                 onClick = onExpandAll,
@@ -670,6 +677,7 @@ fun PracticeScreen(
     state: MedoUiState,
     questionsList: List<QuestionEntity>,
     currentQuestion: QuestionEntity,
+    currentLessonHtml: String? = currentQuestion.lessonHtml,
     currentProgress: UserProgressEntity?,
     onSelectOption: (Int) -> Unit,
     onToggleImmediateMode: () -> Unit,
@@ -729,14 +737,14 @@ fun PracticeScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
+                FlowRow(
                     horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         MedoPill(
                             text = "سوال ${PersianTextUtils.formatNumber(currentIndex + 1, settings.usePersianDigits)} از ${PersianTextUtils.formatNumber(questionsList.size, settings.usePersianDigits)}",
@@ -791,8 +799,9 @@ fun PracticeScreen(
                 }
 
                 // Content status badges (Section 5.6)
-                Row(
+                FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     if (currentQuestion.isTrap) {
@@ -930,10 +939,11 @@ fun PracticeScreen(
                 }
             }
 
-            if (!currentQuestion.lessonHtml.isNullOrBlank()) {
+            val resolvedLessonHtml = currentLessonHtml ?: currentQuestion.lessonHtml
+            if (!resolvedLessonHtml.isNullOrBlank()) {
                 DeterministicSourceLessonCard(
                     questionId = currentQuestion.siteQuestionId,
-                    lessonHtml = currentQuestion.lessonHtml
+                    lessonHtml = resolvedLessonHtml
                 )
             }
         }

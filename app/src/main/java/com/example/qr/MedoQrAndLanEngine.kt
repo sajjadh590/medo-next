@@ -13,19 +13,26 @@ import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
+import java.io.ByteArrayOutputStream
 import java.net.ConnectException
+import java.net.HttpURLConnection
 import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
 import java.net.URI
+import java.net.URL
 import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
 
 /**
  * Pure ZXing QR Scanner, Y-Plane Stride/Rotation Normalizer, Private LAN Validator,
- * Wi-Fi Network Binder, and Persian Clinical Error Mapper (Section A).
+ * Desktop `medo share` HTTP Transfer Client, Wi-Fi Network Binder, and Persian Error Mapper.
  *
  * Strictly zero Google Play Services / ML Kit dependencies.
  */
 object MedoQrAndLanEngine {
+
+    const val TRANSFER_VERIFICATION_NOTE =
+        "تاییدشده با سرور شبیه‌ساز پروتکل (FakeShareServer پورت 8765 بدون توکن و بدون Range) — تایید نشده در برابر سرور واقعی فیزیکی دسکتاپ (Unverified against the real server)"
 
     private val zxingHints: Map<DecodeHintType, Any> = mapOf(
         DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
@@ -200,7 +207,7 @@ object MedoQrAndLanEngine {
                 return text
             }
 
-            // Pass B: Centre crop (70% square/rect)
+            // Pass B: Centre crop (72% square/rect)
             val cropW = (rw * 0.72f).toInt().coerceAtLeast(32)
             val cropH = (rh * 0.72f).toInt().coerceAtLeast(32)
             val left = ((rw - cropW) / 2).coerceAtLeast(0)
@@ -258,7 +265,6 @@ object MedoQrAndLanEngine {
         } catch (_: Exception) {
             reader.reset()
         }
-        // Fallback explicit inverted check
         try {
             return reader.decodeWithState(BinaryBitmap(HybridBinarizer(InvertedLuminanceSource(source)))).text
         } catch (_: Exception) {
@@ -275,7 +281,6 @@ object MedoQrAndLanEngine {
         val h = bitmap.height
         val pixels = IntArray(w * h)
         bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
-        // Convert ARGB pixels to Y-plane luminance and use our multi-rotation/crop/downscale pipeline
         val yBytes = ByteArray(w * h)
         for (i in pixels.indices) {
             val c = pixels[i]
@@ -287,7 +292,6 @@ object MedoQrAndLanEngine {
         val decoded = decodeYuvFrame(yBytes, w, h, w, 1, 0)
         if (decoded != null) return decoded
 
-        // Direct RGBLuminanceSource fallback
         val reader = MultiFormatReader().apply { setHints(zxingHints) }
         return try {
             val rgbSource = RGBLuminanceSource(w, h, pixels)
@@ -411,13 +415,171 @@ object MedoQrAndLanEngine {
     }
 
     // =========================================================================
-    // 5. Wi-Fi Network Binding (prevents cellular default route from breaking LAN)
+    // 5. Desktop `medo share` LAN HTTP Client (Port 8765, No Token, v2 ZIP)
+    // =========================================================================
+
+    /**
+     * Sole network socket factory in the entire application.
+     * Strictly validates that [urlString] resolves to a private RFC1918 LAN IP or localhost
+     * before opening [HttpURLConnection].
+     */
+    fun openValidatedLanConnection(
+        urlString: String,
+        connectTimeoutMs: Int = 6000,
+        readTimeoutMs: Int = 25000
+    ): HttpURLConnection {
+        val validated = validateLanTransferUrl(urlString)
+        if (validated !is LanValidationResult.Valid) {
+            val msg = (validated as LanValidationResult.Invalid).errorFa
+            throw SecurityException(msg)
+        }
+        val conn = (URL(validated.normalizedUrl).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = connectTimeoutMs
+            readTimeout = readTimeoutMs
+            useCaches = false
+            instanceFollowRedirects = false
+            setRequestProperty("Accept", "application/zip, application/octet-stream, application/json, text/html, */*")
+        }
+        return conn
+    }
+
+    /**
+     * Downloads a `.medo` v2 bundle from the desktop `medo share` server (`http://<LAN_IP>:8765`):
+     * - Supports direct `.medo` / ZIP URLs (`http://<LAN_IP>:8765/bank.medo` or `GET /` returning ZIP bytes)
+     * - Supports `GET /` returning an HTML landing page with `<a href="/bank.medo">` (or any `*.medo` href),
+     *   following the `.medo` link on the same validated private LAN host:port.
+     * - Does not require a token or `Range` header (matching `medo/share.py`).
+     */
+    fun downloadBankFromLanServer(
+        rawServerUrl: String,
+        optionalPin: String? = null,
+        onProgressBytes: (Long) -> Unit = {}
+    ): Result<ByteArray> {
+        val valRes = validateLanTransferUrl(rawServerUrl, optionalPin)
+        if (valRes is LanValidationResult.Invalid) {
+            return Result.failure(IllegalArgumentException(valRes.errorFa))
+        }
+        val valid = valRes as LanValidationResult.Valid
+        val baseHostPort = "http://${valid.host}:${valid.port}"
+
+        val candidateUrls = linkedSetOf<String>().apply {
+            add(valid.normalizedUrl)
+            add("$baseHostPort/bank.medo")
+            add("$baseHostPort/questions.medo")
+            add("$baseHostPort/medo.zip")
+            add("$baseHostPort/")
+        }
+
+        var lastException: Exception? = null
+        var lastHttpStatus: Int? = null
+
+        for (candidateUrl in candidateUrls) {
+            try {
+                DiagnosticsLogger.logEvent("LAN_GET", "درخواست دریافت بسته از: $candidateUrl")
+                val conn = openValidatedLanConnection(candidateUrl)
+                val status = conn.responseCode
+                lastHttpStatus = status
+                if (status in 200..299) {
+                    val contentType = conn.contentType?.lowercase().orEmpty()
+                    val bytes = readStreamWithProgress(conn, onProgressBytes)
+                    conn.disconnect()
+
+                    if (isMedoBundleBytes(bytes)) {
+                        DiagnosticsLogger.logEvent("LAN_OK", "بسته .medo دریافت شد (${bytes.size} بایت از $candidateUrl)")
+                        return Result.success(bytes)
+                    }
+
+                    // If landing page HTML was returned on GET /, extract href="...medo"
+                    if (contentType.contains("text/html") || looksLikeHtml(bytes)) {
+                        val html = bytes.toString(StandardCharsets.UTF_8)
+                        val discoveredHref = extractMedoHrefFromHtml(html)
+                        if (discoveredHref != null) {
+                            val targetUrl = if (discoveredHref.startsWith("http")) {
+                                discoveredHref
+                            } else if (discoveredHref.startsWith("/")) {
+                                "$baseHostPort$discoveredHref"
+                            } else {
+                                "$baseHostPort/$discoveredHref"
+                            }
+                            val dlConn = openValidatedLanConnection(targetUrl)
+                            if (dlConn.responseCode in 200..299) {
+                                val bundleBytes = readStreamWithProgress(dlConn, onProgressBytes)
+                                dlConn.disconnect()
+                                if (isMedoBundleBytes(bundleBytes)) {
+                                    DiagnosticsLogger.logEvent("LAN_OK", "بسته .medo از لینک صفحه اصلی دریافت شد (${bundleBytes.size} بایت)")
+                                    return Result.success(bundleBytes)
+                                }
+                            } else {
+                                dlConn.disconnect()
+                            }
+                        }
+                    }
+                } else {
+                    conn.disconnect()
+                    if (status == 401 || status == 403) {
+                        val mapped = mapTransferError(httpStatusCode = status)
+                        return Result.failure(IllegalStateException(mapped.fullMessageFa))
+                    }
+                }
+            } catch (e: Exception) {
+                lastException = e
+                DiagnosticsLogger.logEvent("LAN_TRY_ERR", "خطا در $candidateUrl: ${e.javaClass.simpleName}")
+                if (e is ConnectException || e is NoRouteToHostException || e is SocketTimeoutException) {
+                    break
+                }
+            }
+        }
+
+        val mapped = mapTransferError(throwable = lastException, httpStatusCode = lastHttpStatus)
+        return Result.failure(IllegalStateException(mapped.fullMessageFa, lastException))
+    }
+
+    private fun readStreamWithProgress(conn: HttpURLConnection, onProgressBytes: (Long) -> Unit): ByteArray {
+        val baos = ByteArrayOutputStream()
+        conn.inputStream.use { input ->
+            val buf = ByteArray(16 * 1024)
+            var total = 0L
+            while (true) {
+                val r = input.read(buf)
+                if (r <= 0) break
+                baos.write(buf, 0, r)
+                total += r
+                onProgressBytes(total)
+            }
+        }
+        return baos.toByteArray()
+    }
+
+    private fun isMedoBundleBytes(bytes: ByteArray): Boolean {
+        if (bytes.size < 4) return false
+        val b0 = bytes[0].toInt() and 0xFF
+        val b1 = bytes[1].toInt() and 0xFF
+        if (b0 == 0x50 && b1 == 0x4B) return true // ZIP ("PK")
+        if (b0 == 0x1F && b1 == 0x8B) return true // GZIP
+        val head = bytes.take(64).toByteArray().toString(StandardCharsets.UTF_8).trimStart()
+        return head.startsWith("{") || head.startsWith("[")
+    }
+
+    private fun looksLikeHtml(bytes: ByteArray): Boolean {
+        val head = bytes.take(128).toByteArray().toString(StandardCharsets.UTF_8).trimStart().lowercase()
+        return head.startsWith("<!doctype html") || head.startsWith("<html") || head.contains("<a href=")
+    }
+
+    private fun extractMedoHrefFromHtml(html: String): String? {
+        val regex = Regex("""href\s*=\s*["']([^"']+\.(?:medo|zip|json))["']""", RegexOption.IGNORE_CASE)
+        return regex.find(html)?.groupValues?.getOrNull(1)
+    }
+
+    // =========================================================================
+    // 6. Wi-Fi Network Binding (prevents cellular default route from breaking LAN)
     // =========================================================================
 
     fun bindProcessToWifiIfAvailable(context: Context): Boolean {
         return try {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
                 ?: return false
+            @Suppress("DEPRECATION")
             val allNetworks = cm.allNetworks
             val wifiNetwork = allNetworks.firstOrNull { net ->
                 val caps = cm.getNetworkCapabilities(net)
@@ -437,8 +599,16 @@ object MedoQrAndLanEngine {
         }
     }
 
+    fun unbindProcessFromNetwork(context: Context) {
+        try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            cm?.bindProcessToNetwork(null)
+        } catch (_: Exception) {
+        }
+    }
+
     // =========================================================================
-    // 6. Specific Persian Error Mapper with Actionable Next Steps
+    // 7. Specific Persian Error Mapper with Actionable Next Steps
     // =========================================================================
 
     enum class TransferErrorKind {
@@ -516,7 +686,7 @@ object MedoQrAndLanEngine {
             else -> MappedTransferError(
                 kind = TransferErrorKind.UNKNOWN,
                 titleFa = "خطا در ارتباط شبکه محلی (${throwable?.javaClass?.simpleName ?: "نامشخص"})",
-                nextStepFa = "آدرس IP و پورت را بررسی کرده یا از گزینه «انتخاب فایل از حافظه» استفاده کنید."
+                nextStepFa = "آدرس IP و پورت را بررسی کرده یا از دکمه «انتخاب فایل بانک (.medo) از حافظه گوشی» استفاده کنید."
             )
         }
     }

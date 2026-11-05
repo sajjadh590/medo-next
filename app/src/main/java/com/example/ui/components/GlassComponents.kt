@@ -15,12 +15,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -49,6 +52,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -81,7 +85,6 @@ fun MedoProceduralBackground(
                         end = Offset(size.width, size.height)
                     )
                 )
-                // Subtle clinical ambient glow orb at top-right and bottom-left
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
@@ -109,14 +112,15 @@ fun MedoProceduralBackground(
 
 /**
  * Translucent frosted GlassCard with hairline inner border and top specular highlight.
- * Uses higher opacity when [isReadingSurface] = true to guarantee >= 4.5:1 text legibility.
+ * Uses `wrapContentHeight()` and adaptive padding so boxes always fit their text cleanly
+ * without clipping or excessive empty space.
  */
 @Composable
 fun GlassCard(
     modifier: Modifier = Modifier,
     isReadingSurface: Boolean = false,
-    cornerRadius: Dp = 24.dp,
-    contentPadding: PaddingValues = PaddingValues(16.dp),
+    cornerRadius: Dp = 20.dp,
+    contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
     onClick: (() -> Unit)? = null,
     content: @Composable () -> Unit
 ) {
@@ -146,6 +150,7 @@ fun GlassCard(
     val topHighlightColor = Color.White.copy(alpha = tokens.highlightAlpha)
 
     val cardModifier = modifier
+        .wrapContentHeight()
         .clip(shape)
         .background(
             brush = Brush.verticalGradient(
@@ -158,7 +163,6 @@ fun GlassCard(
         )
         .border(BorderStroke(1.dp, borderColor), shape)
         .drawBehind {
-            // Subtle top specular highlight line
             drawLine(
                 color = topHighlightColor,
                 start = Offset(cornerRadius.toPx() * 0.6f, 1.dp.toPx()),
@@ -180,6 +184,10 @@ fun GlassCard(
     }
 }
 
+/**
+ * Adaptive pill component that expands vertically (`heightIn(min = 36.dp)`) and supports up to 2 lines
+ * so Persian labels never get clipped or squished at any font scale.
+ */
 @Composable
 fun MedoPill(
     text: String,
@@ -188,14 +196,17 @@ fun MedoPill(
     contentColor: Color = LocalMedoTheme.current.accent,
     onClick: (() -> Unit)? = null
 ) {
-    val shape = RoundedCornerShape(50)
+    val shape = RoundedCornerShape(14.dp)
     val mod = if (onClick != null) {
         modifier
             .minimumInteractiveComponentSize()
+            .heightIn(min = 40.dp)
             .clip(shape)
             .clickable(onClick = onClick)
     } else {
-        modifier.clip(shape)
+        modifier
+            .heightIn(min = 32.dp)
+            .clip(shape)
     }
     Surface(
         modifier = mod,
@@ -212,7 +223,8 @@ fun MedoPill(
                 text = text,
                 style = MaterialTheme.typography.labelLarge,
                 color = contentColor,
-                maxLines = 1,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
         }
@@ -223,18 +235,19 @@ fun MedoPill(
 fun MedoProgressRing(
     progress: Float,
     modifier: Modifier = Modifier,
-    size: Dp = 42.dp,
-    strokeWidth: Dp = 4.dp,
+    size: Dp = 52.dp,
+    strokeWidth: Dp = 4.5.dp,
     showPercentageText: Boolean = true
 ) {
     val tokens = LocalMedoTheme.current
     val settings = LocalMedoSettings.current
     val clamped = progress.coerceIn(0f, 1f)
     val pct = (clamped * 100).toInt()
+    val effectiveSize = (size * settings.textSizePreset.scaleMultiplier.coerceIn(1f, 1.35f))
 
     Box(
         modifier = modifier
-            .size(size)
+            .size(effectiveSize)
             .semantics { contentDescription = "پیشرفت $pct درصد" },
         contentAlignment = Alignment.Center
     ) {
@@ -258,9 +271,10 @@ fun MedoProgressRing(
         if (showPercentageText) {
             Text(
                 text = "${PersianTextUtils.formatNumber(pct, settings.usePersianDigits)}٪",
-                style = MaterialTheme.typography.labelMedium,
+                style = MaterialTheme.typography.labelSmall,
                 color = tokens.textPrimary,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
             )
         }
     }
@@ -278,7 +292,7 @@ enum class OptionVisualState {
  * - Letter badge (الف، ب، ج، د)
  * - Correct/wrong never relies on color alone (always displays ✓ Check or ✗ Close glyph)
  * - Optional community vote share bar & percentage
- * - Minimum 48dp touch target
+ * - Minimum 48dp touch target, flexible height that wraps long multi-line clinical options cleanly.
  */
 @Composable
 fun ClinicalOptionRow(
@@ -328,7 +342,8 @@ fun ClinicalOptionRow(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .minimumInteractiveComponentSize()
+            .wrapContentHeight()
+            .defaultMinSize(minHeight = 52.dp)
             .clip(shape)
             .background(bgColor, shape)
             .border(BorderStroke(if (state == OptionVisualState.NEUTRAL) 1.dp else 2.dp, borderColor), shape)
@@ -341,10 +356,9 @@ fun ClinicalOptionRow(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth()
         ) {
-            // Option badge circle (الف ب ج د + ✓/✗ glyph for non-color-only state indication)
             Box(
                 modifier = Modifier
-                    .size(34.dp)
+                    .size(36.dp)
                     .clip(CircleShape)
                     .background(
                         when (state) {
@@ -437,6 +451,10 @@ fun ClinicalOptionRow(
     }
 }
 
+/**
+ * Adaptive primary button using `heightIn(min = 48.dp)` and `wrapContentHeight()`
+ * so buttons grow dynamically to fit multi-word Persian text and 2.0x font scale.
+ */
 @Composable
 fun MedoPrimaryButton(
     text: String,
@@ -449,20 +467,28 @@ fun MedoPrimaryButton(
         onClick = onClick,
         enabled = enabled,
         shape = RoundedCornerShape(16.dp),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = tokens.accent,
             contentColor = tokens.accentOn
         ),
-        modifier = modifier.height(48.dp)
+        modifier = modifier
+            .heightIn(min = 48.dp)
+            .wrapContentHeight()
     ) {
         Text(
             text = text,
             style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center
         )
     }
 }
 
+/**
+ * Adaptive secondary button using `heightIn(min = 48.dp)` and `wrapContentHeight()`
+ * so buttons never clip or overflow their text.
+ */
 @Composable
 fun MedoSecondaryButton(
     text: String,
@@ -475,15 +501,19 @@ fun MedoSecondaryButton(
         onClick = onClick,
         enabled = enabled,
         shape = RoundedCornerShape(16.dp),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
         border = BorderStroke(1.dp, tokens.accent.copy(alpha = 0.6f)),
         colors = ButtonDefaults.outlinedButtonColors(
             contentColor = tokens.textPrimary
         ),
-        modifier = modifier.height(48.dp)
+        modifier = modifier
+            .heightIn(min = 48.dp)
+            .wrapContentHeight()
     ) {
         Text(
             text = text,
-            style = MaterialTheme.typography.titleMedium
+            style = MaterialTheme.typography.titleMedium,
+            textAlign = TextAlign.Center
         )
     }
 }

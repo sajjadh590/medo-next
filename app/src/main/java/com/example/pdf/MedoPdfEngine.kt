@@ -14,8 +14,8 @@ import java.io.File
 import java.io.FileOutputStream
 
 enum class PdfExportMode(val labelFa: String) {
-    EXAM("آزمون (بدون پاسخ)"),
-    STUDY("مطالعه (با پاسخ)")
+    EXAM("آزمون (بدون پاسخ در صفحات سوال + کلید و تشریح در انتها)"),
+    STUDY("مطالعه (با پاسخ در کنار سوالات + کلید و تشریح)")
 }
 
 enum class PdfTextSize(val labelFa: String, val bodyPt: Float, val headerPt: Float) {
@@ -34,11 +34,11 @@ data class PdfExportConfig(
 
 /**
  * Pure-logic PDF Layout & Planner (`PdfPlan` / `PdfLayout`) with:
- * - Strict Exam Mode No-Leak Guarantee (never includes correct answer, tick glyph, bold option, or explanation on question pages)
+ * - Strict Exam Mode No-Leak Guarantee on Question Pages (never includes correct answer, tick glyph, bold option, or explanation on question pages)
+ * - Separate Answer Key Table page(s) (5 pairs per row, "—" for missing keys) after the question pages in BOTH Exam and Study modes
+ * - Separate Grouped Explanations page(s) («سوال‌های ۲ تا ۹: پاسخ تشریحی ثبت نشده») after the Answer Key Table page(s) in BOTH Exam and Study modes
  * - Keep-together pagination (cards never split across pages unless taller than a full page)
  * - Multi-column compact lab-value detector (3+ consecutive short lines <= 36 chars)
- * - Chapter Answer Key Table (5 pairs per row, "—" for missing keys)
- * - Compressed missing explanation ranges («سوال‌های ۲ تا ۹: پاسخ تشریحی ثبت نشده»)
  * - Interactive-only sentence filter (drops sentences mentioning «مایندمپ» together with «کلیک»)
  * - BidiGuard runs for Persian labels + numerals
  */
@@ -61,7 +61,7 @@ object MedoPdfEngine {
         val questionNumber: Int,
         val siteQuestionId: String,
         val stemLines: List<String>,
-        val compactLabGridRows: List<List<String>>, // Non-empty when 3+ consecutive short lab lines are compacted
+        val compactLabGridRows: List<List<String>>,
         val options: List<PlannedOptionRow>,
         val estimatedHeightPt: Int
     )
@@ -86,6 +86,8 @@ object MedoPdfEngine {
         val questionPages: List<List<PlannedQuestionCard>>,
         val answerKeyRows: List<AnswerKeyTableRow>,
         val explanationItems: List<PlannedExplanationItem>,
+        val answerKeyStartPage: Int,
+        val explanationsStartPage: Int,
         val totalPageCount: Int
     )
 
@@ -218,7 +220,8 @@ object MedoPdfEngine {
     }
 
     /**
-     * Plans pages with keep-together card pagination and strict Exam Mode isolation.
+     * Plans pages with keep-together card pagination, strict Exam Mode question-page isolation,
+     * followed by separate Answer Key Table page(s) and separate Grouped Explanations page(s).
      */
     fun createPlan(
         questions: List<QuestionEntity>,
@@ -233,7 +236,7 @@ object MedoPdfEngine {
             val rawOptions = parseOptionsJson(q.optionsJson)
 
             val plannedOptions = rawOptions.mapIndexed { optIdx, optText ->
-                // CRITICAL: In EXAM mode, NEVER leak correctOptionIndex
+                // CRITICAL: In EXAM mode, NEVER leak correctOptionIndex on question pages
                 val markCorrect = config.mode == PdfExportMode.STUDY &&
                     q.hasKey &&
                     q.correctOptionIndex == optIdx
@@ -283,19 +286,29 @@ object MedoPdfEngine {
 
         val keyRows = buildAnswerKeyTable(questions)
         val explanations = buildExplanationPlan(questions)
-        val keyAndExplanationPages = if (questions.isEmpty()) 0 else 1 + (explanations.size / 14)
+
+        // Separate page(s) for Answer Key Table after the questions, then separate page(s) for Grouped Explanations
+        val keyPagesCount = if (questions.isEmpty()) 0 else ((keyRows.size - 1) / 30) + 1
+        val explanationPagesCount = if (questions.isEmpty()) 0 else ((explanations.size - 1) / 12) + 1
+        val keyStartPage = questionPages.size + 1
+        val expStartPage = questionPages.size + keyPagesCount + 1
 
         return PdfPlanResult(
             config = config,
             questionPages = questionPages,
             answerKeyRows = keyRows,
             explanationItems = explanations,
-            totalPageCount = questionPages.size + keyAndExplanationPages
+            answerKeyStartPage = keyStartPage,
+            explanationsStartPage = expStartPage,
+            totalPageCount = questionPages.size + keyPagesCount + explanationPagesCount
         )
     }
 
     /**
-     * Renders the planned PDF into an actual A4 `.pdf` file using Android's `PdfDocument`.
+     * Renders the planned PDF into an actual A4 `.pdf` file:
+     * - Pages 1..Q: Question pages (zero answer leak in Exam mode; marked with ✓ in Study mode)
+     * - Next Page(s): Chapter Answer Key Table (5 pairs per row)
+     * - Next Page(s): Grouped Chapter Explanations (separate page from the key table)
      */
     fun renderToFile(
         context: Context,
@@ -336,8 +349,10 @@ object MedoPdfEngine {
 
             var pageNum = 1
             val totalPages = plan.totalPageCount.coerceAtLeast(1)
+            val rightEdge = (A4_WIDTH_PT - MARGIN_PT).toFloat()
+            val leftEdge = MARGIN_PT.toFloat()
 
-            // 1. Render Question Pages
+            // 1. Render Question Pages (Strictly no answer leak in EXAM mode)
             for (pageCards in plan.questionPages) {
                 val pageInfo = PdfDocument.PageInfo.Builder(A4_WIDTH_PT, A4_HEIGHT_PT, pageNum).create()
                 val page = doc.startPage(pageInfo)
@@ -346,9 +361,6 @@ object MedoPdfEngine {
                 drawHeaderAndFooter(canvas, config, pageNum, totalPages, titlePaint, bodyPaint, borderPaint)
 
                 var y = MARGIN_PT + 34f
-                val rightEdge = (A4_WIDTH_PT - MARGIN_PT).toFloat()
-                val leftEdge = MARGIN_PT.toFloat()
-
                 for (card in pageCards) {
                     val cardTop = y
                     val cardBottom = (y + card.estimatedHeightPt).coerceAtMost((A4_HEIGHT_PT - MARGIN_PT - 24).toFloat())
@@ -410,58 +422,69 @@ object MedoPdfEngine {
                 pageNum++
             }
 
-            // 2. Render Answer Key Table + Chapter Explanations Page(s)
-            if (questions.isNotEmpty() && pageNum <= totalPages) {
-                val pageInfo = PdfDocument.PageInfo.Builder(A4_WIDTH_PT, A4_HEIGHT_PT, pageNum).create()
-                val page = doc.startPage(pageInfo)
-                val canvas = page.canvas
+            // 2. Render Answer Key Table Page(s) (5 pairs per row, separate from question pages)
+            if (questions.isNotEmpty()) {
+                for (keyChunk in plan.answerKeyRows.chunked(30)) {
+                    val pageInfo = PdfDocument.PageInfo.Builder(A4_WIDTH_PT, A4_HEIGHT_PT, pageNum).create()
+                    val page = doc.startPage(pageInfo)
+                    val canvas = page.canvas
 
-                drawHeaderAndFooter(canvas, config, pageNum, totalPages, titlePaint, bodyPaint, borderPaint)
+                    drawHeaderAndFooter(canvas, config, pageNum, totalPages, titlePaint, bodyPaint, borderPaint)
 
-                var y = MARGIN_PT + 38f
-                val rightEdge = (A4_WIDTH_PT - MARGIN_PT).toFloat()
-                val leftEdge = MARGIN_PT.toFloat()
+                    var y = MARGIN_PT + 38f
+                    canvas.drawText("کلید پاسخنامه (${config.chapterTitle}) - ۵ جفت در هر سطر", rightEdge, y, titlePaint)
+                    y += 16f
 
-                canvas.drawText("کلید پاسخنامه (${config.chapterTitle})", rightEdge, y, titlePaint)
-                y += 16f
-
-                val colWidth = (rightEdge - leftEdge) / 5f
-                for (row in plan.answerKeyRows) {
-                    val rowTop = y
-                    val rowBottom = y + 20f
-                    for (cIdx in 0 until 5) {
-                        val cellRight = rightEdge - (cIdx * colWidth)
-                        val cellLeft = cellRight - colWidth
-                        canvas.drawRect(RectF(cellLeft, rowTop, cellRight, rowBottom), borderPaint)
-                        val pair = row.pairs.getOrNull(cIdx)
-                        if (pair != null) {
-                            val cellLabel = "${PersianTextUtils.formatNumber(pair.questionNumber, true)}: ${pair.answerSymbol}"
-                            canvas.drawText(cellLabel, cellRight - 8f, rowTop + 14f, boldBodyPaint)
+                    val colWidth = (rightEdge - leftEdge) / 5f
+                    for (row in keyChunk) {
+                        val rowTop = y
+                        val rowBottom = y + 20f
+                        for (cIdx in 0 until 5) {
+                            val cellRight = rightEdge - (cIdx * colWidth)
+                            val cellLeft = cellRight - colWidth
+                            canvas.drawRect(RectF(cellLeft, rowTop, cellRight, rowBottom), borderPaint)
+                            val pair = row.pairs.getOrNull(cIdx)
+                            if (pair != null) {
+                                val cellLabel = "${PersianTextUtils.formatNumber(pair.questionNumber, true)}: ${pair.answerSymbol}"
+                                canvas.drawText(cellLabel, cellRight - 8f, rowTop + 14f, boldBodyPaint)
+                            }
                         }
+                        y += 20f
                     }
+
+                    doc.finishPage(page)
+                    pageNum++
+                }
+
+                // 3. Render Grouped Explanations Page(s) (Separate page(s) after the Answer Key Table)
+                for (expChunk in plan.explanationItems.chunked(12)) {
+                    val pageInfo = PdfDocument.PageInfo.Builder(A4_WIDTH_PT, A4_HEIGHT_PT, pageNum).create()
+                    val page = doc.startPage(pageInfo)
+                    val canvas = page.canvas
+
+                    drawHeaderAndFooter(canvas, config, pageNum, totalPages, titlePaint, bodyPaint, borderPaint)
+
+                    var y = MARGIN_PT + 38f
+                    canvas.drawText("پاسخنامه تشریحی فصل (${config.chapterTitle})", rightEdge, y, titlePaint)
                     y += 20f
-                    if (y > A4_HEIGHT_PT - MARGIN_PT - 120) break
-                }
 
-                y += 24f
-                canvas.drawText("پاسخنامه تشریحی فصل", rightEdge, y, titlePaint)
-                y += 18f
-
-                for (exp in plan.explanationItems) {
-                    if (y > A4_HEIGHT_PT - MARGIN_PT - 40) break
-                    canvas.drawText(exp.headerLabel, rightEdge, y, boldBodyPaint)
-                    y += config.textSize.bodyPt * 1.5f
-                    if (!exp.isCompressedMissingRange && exp.bodyText.isNotBlank()) {
-                        for (chunk in exp.bodyText.chunked(78).take(3)) {
-                            if (y > A4_HEIGHT_PT - MARGIN_PT - 28) break
-                            canvas.drawText(chunk, rightEdge - 8f, y, bodyPaint)
-                            y += config.textSize.bodyPt * 1.45f
+                    for (exp in expChunk) {
+                        if (y > A4_HEIGHT_PT - MARGIN_PT - 40) break
+                        canvas.drawText(exp.headerLabel, rightEdge, y, boldBodyPaint)
+                        y += config.textSize.bodyPt * 1.5f
+                        if (!exp.isCompressedMissingRange && exp.bodyText.isNotBlank()) {
+                            for (chunk in exp.bodyText.chunked(78).take(3)) {
+                                if (y > A4_HEIGHT_PT - MARGIN_PT - 28) break
+                                canvas.drawText(chunk, rightEdge - 8f, y, bodyPaint)
+                                y += config.textSize.bodyPt * 1.45f
+                            }
                         }
+                        y += 8f
                     }
-                    y += 6f
-                }
 
-                doc.finishPage(page)
+                    doc.finishPage(page)
+                    pageNum++
+                }
             }
 
             outputFile.parentFile?.mkdirs()
@@ -469,7 +492,6 @@ object MedoPdfEngine {
                 doc.writeTo(out)
             }
         } catch (_: Exception) {
-            // Fallback when running under JVM Robolectric where native libpdfium/PdfDocument pointer is 0
             writeValidFallbackPdfFile(plan, outputFile)
         } finally {
             try {
@@ -492,11 +514,9 @@ object MedoPdfEngine {
         val rightEdge = (A4_WIDTH_PT - MARGIN_PT).toFloat()
         val leftEdge = MARGIN_PT.toFloat()
 
-        // Compact header
         canvas.drawText(config.title, rightEdge, MARGIN_PT + 12f, titlePaint)
         canvas.drawLine(leftEdge, MARGIN_PT + 18f, rightEdge, MARGIN_PT + 18f, linePaint)
 
-        // Compact footer with «صفحه n از N» using BidiGuard
         val footerY = (A4_HEIGHT_PT - MARGIN_PT).toFloat()
         canvas.drawLine(leftEdge, footerY - 16f, rightEdge, footerY - 16f, linePaint)
         val pageLabel = "صفحه ${PersianTextUtils.formatNumber(pageNumber, true)} از ${PersianTextUtils.formatNumber(totalPages, true)}"
@@ -520,18 +540,20 @@ object MedoPdfEngine {
         val kids = (0 until pageCount).joinToString(" ") { "${3 + it * 2} 0 R" }
         sb.append("2 0 obj << /Type /Pages /Kids [$kids] /Count $pageCount >> endobj\n")
         var currentPageIdx = 0
+
+        // 1. Question Pages (Strictly no answer leak in EXAM mode)
         plan.questionPages.forEach { cards ->
             val pageObjId = 3 + currentPageIdx * 2
             val contentObjId = pageObjId + 1
             val textLines = buildString {
-                append("BT /F1 11 Tf 36 800 Td (${plan.config.title.replace("(", "[").replace(")", "]")} - Page ${currentPageIdx + 1}/$pageCount) Tj ET\n")
+                append("BT /F1 11 Tf 36 800 Td (QUESTION_PAGE ${currentPageIdx + 1}/$pageCount - ${plan.config.mode.name}) Tj ET\n")
                 var y = 775
                 cards.forEach { card ->
                     append("BT /F1 10 Tf 36 $y Td (Q${card.questionNumber} [${card.siteQuestionId}]: ${card.stemLines.firstOrNull().orEmpty().take(60).replace("(", "[").replace(")", "]")}) Tj ET\n")
                     y -= 14
                     card.options.forEach { opt ->
-                        val mark = if (opt.isMarkedCorrectInStudyMode) "*" else " "
-                        append("BT /F1 9 Tf 48 $y Td ($mark ${opt.circleNumberLabel} ${opt.text.take(50).replace("(", "[").replace(")", "]")}) Tj ET\n")
+                        val mark = if (opt.isMarkedCorrectInStudyMode) "CORRECT_MARK" else "OPT"
+                        append("BT /F1 9 Tf 48 $y Td ($mark (${opt.circleNumberLabel}) ${opt.text.take(50).replace("(", "[").replace(")", "]")}) Tj ET\n")
                         y -= 12
                     }
                 }
@@ -540,29 +562,46 @@ object MedoPdfEngine {
             sb.append("$contentObjId 0 obj << /Length ${textLines.toByteArray().size} >> stream\n$textLines\nendstream endobj\n")
             currentPageIdx++
         }
-        while (currentPageIdx < pageCount) {
+
+        // 2. Separate Answer Key Table Page(s) (5 pairs per row)
+        for (keyChunk in plan.answerKeyRows.chunked(30)) {
+            if (currentPageIdx >= pageCount) break
             val pageObjId = 3 + currentPageIdx * 2
             val contentObjId = pageObjId + 1
             val textLines = buildString {
-                append("BT /F1 11 Tf 36 800 Td (Answer Key & Explanations - Page ${currentPageIdx + 1}/$pageCount) Tj ET\n")
+                append("BT /F1 11 Tf 36 800 Td (ANSWER_KEY_TABLE_PAGE ${currentPageIdx + 1}/$pageCount - 5 PAIRS PER ROW) Tj ET\n")
                 var y = 770
-                plan.answerKeyRows.forEach { row ->
+                keyChunk.forEach { row ->
                     val rowStr = row.pairs.joinToString(" | ") { "${it.questionNumber}:${it.answerSymbol}" }
                     append("BT /F1 10 Tf 36 $y Td ($rowStr) Tj ET\n")
                     y -= 14
-                }
-                plan.explanationItems.forEach { exp ->
-                    append("BT /F1 9 Tf 36 $y Td (${exp.headerLabel.replace("(", "[").replace(")", "]")}: ${exp.bodyText.take(60).replace("(", "[").replace(")", "]")}) Tj ET\n")
-                    y -= 12
                 }
             }
             sb.append("$pageObjId 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 $A4_WIDTH_PT $A4_HEIGHT_PT] /Contents $contentObjId 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >> endobj\n")
             sb.append("$contentObjId 0 obj << /Length ${textLines.toByteArray().size} >> stream\n$textLines\nendstream endobj\n")
             currentPageIdx++
         }
+
+        // 3. Separate Grouped Explanations Page(s)
+        for (expChunk in plan.explanationItems.chunked(12)) {
+            if (currentPageIdx >= pageCount) break
+            val pageObjId = 3 + currentPageIdx * 2
+            val contentObjId = pageObjId + 1
+            val textLines = buildString {
+                append("BT /F1 11 Tf 36 800 Td (GROUPED_EXPLANATIONS_PAGE ${currentPageIdx + 1}/$pageCount) Tj ET\n")
+                var y = 770
+                expChunk.forEach { exp ->
+                    append("BT /F1 9 Tf 36 $y Td (${exp.headerLabel.replace("(", "[").replace(")", "]")}: ${exp.bodyText.take(65).replace("(", "[").replace(")", "]")}) Tj ET\n")
+                    y -= 14
+                }
+            }
+            sb.append("$pageObjId 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 $A4_WIDTH_PT $A4_HEIGHT_PT] /Contents $contentObjId 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >> endobj\n")
+            sb.append("$contentObjId 0 obj << /Length ${textLines.toByteArray().size} >> stream\n$textLines\nendstream endobj\n")
+            currentPageIdx++
+        }
+
         sb.append("trailer << /Root 1 0 R >>\n%%EOF\n")
+        outputFile.parentFile?.mkdirs()
         outputFile.writeText(sb.toString(), Charsets.UTF_8)
     }
 }
-
-

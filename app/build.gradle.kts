@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.medonext.rxkqmp"
     minSdk = 24
     targetSdk = 36
-    versionCode = 200
-    versionName = "2.0.0-next"
+    versionCode = 201
+    versionName = "201.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     buildConfigField("String", "FLAVOR_PACKAGE_NEXT", "\"ir.medo.app.next\"")
@@ -65,7 +65,17 @@ android {
     compose = true
     buildConfig = true
   }
-  testOptions { unitTests { isIncludeAndroidResources = true } }
+  testOptions {
+    unitTests {
+      isIncludeAndroidResources = true
+      all {
+        it.systemProperty(
+          "robolectric.dependency.repo.url",
+          "https://maven-central.storage-download.googleapis.com/maven2/"
+        )
+      }
+    }
+  }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true

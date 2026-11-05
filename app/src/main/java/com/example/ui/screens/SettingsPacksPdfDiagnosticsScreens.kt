@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -7,10 +10,8 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -81,12 +82,15 @@ fun SettingsModalScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
+            FlowRow(
+                verticalArrangement = Arrangement.Center,
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
                     IconButton(onClick = onClose, modifier = Modifier.testTag("close_settings_btn")) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
@@ -118,9 +122,9 @@ fun SettingsModalScreen(
                     .testTag("settings_live_preview_card")
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
+                    FlowRow(
                         horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
@@ -189,12 +193,12 @@ fun SettingsModalScreen(
             }
         }
 
-        // 2. Font Family Selector (Persian: Vazirmatn, B Nazanin/Markazi, Amiri + English: Inter, Roboto, JetBrains Mono)
+        // 2. Font Family Selector (Persian: Vazirmatn default + Markazi/B Nazanin, Amiri + English: Inter, Roboto, JetBrains Mono)
         item {
             GlassCard(modifier = Modifier.fillMaxWidth()) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = "انتخاب فونت فارسی و انگلیسی (کاملاً آفلاین):",
+                        text = "انتخاب فونت فارسی و انگلیسی (پیش‌فرض: وزیرمتن، کاملاً آفلاین):",
                         style = MaterialTheme.typography.titleMedium,
                         color = tokens.textPrimary,
                         fontWeight = FontWeight.Bold
@@ -264,7 +268,8 @@ fun SettingsModalScreen(
                         Text(
                             text = "هماهنگی خودکار با حالت روز/شب سیستم:",
                             style = MaterialTheme.typography.bodyLarge,
-                            color = tokens.textPrimary
+                            color = tokens.textPrimary,
+                            modifier = Modifier.weight(1f)
                         )
                         Switch(
                             checked = settings.followSystemTheme,
@@ -277,7 +282,7 @@ fun SettingsModalScreen(
             }
         }
 
-        // 4. Glass Effect, Text Size, Persian Digits, Reduce Motion, Daily Auto-Backup to Documents
+        // 4. Glass Effect, Text Size, Persian Digits, Daily Auto-Backup via MediaStore/SAF + Last Backup Time
         item {
             GlassCard(modifier = Modifier.fillMaxWidth()) {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -287,7 +292,10 @@ fun SettingsModalScreen(
                         color = tokens.textPrimary,
                         fontWeight = FontWeight.Bold
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         GlassEffectMode.entries.forEach { mode ->
                             MedoPill(
                                 text = mode.labelFa,
@@ -304,7 +312,10 @@ fun SettingsModalScreen(
                         color = tokens.textPrimary,
                         fontWeight = FontWeight.Bold
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         TextSizePreset.entries.forEach { preset ->
                             MedoPill(
                                 text = preset.labelFa,
@@ -324,7 +335,8 @@ fun SettingsModalScreen(
                         Text(
                             text = "نمایش ارقام به صورت فارسی (۰-۹):",
                             style = MaterialTheme.typography.bodyLarge,
-                            color = tokens.textPrimary
+                            color = tokens.textPrimary,
+                            modifier = Modifier.weight(1f)
                         )
                         Switch(
                             checked = settings.usePersianDigits,
@@ -340,11 +352,19 @@ fun SettingsModalScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(
-                            text = "پشتیبان‌گیری خودکار روزانه در پوشه Documents:",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = tokens.textPrimary
-                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "پشتیبان‌گیری خودکار روزانه در پوشه Documents (MediaStore):",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = tokens.textPrimary
+                            )
+                            Text(
+                                text = "آخرین پشتیبان‌گیری: ${state.lastAutoBackupStatusFa}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = tokens.accent,
+                                modifier = Modifier.testTag("last_auto_backup_status_text")
+                            )
+                        }
                         Switch(
                             checked = settings.dailyAutoBackupToDocuments,
                             onCheckedChange = { checked ->
@@ -367,10 +387,13 @@ fun SettingsModalScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PackManagerModalScreen(
     state: MedoUiState,
     onOpenQrScanner: () -> Unit,
+    onDownloadFromLanServer: (String) -> Unit,
+    onImportLocalBankUri: (Uri) -> Unit,
     onTriggerDeltaUpdate: (mirrorMode: Boolean) -> Unit,
     onDeletePack: (String) -> Unit,
     onClose: () -> Unit
@@ -384,6 +407,14 @@ fun PackManagerModalScreen(
     var selectMedia by remember { mutableStateOf(true) }
     var lanValidationError by remember { mutableStateOf<String?>(null) }
 
+    val openMedoFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            onImportLocalBankUri(uri)
+        }
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -393,12 +424,15 @@ fun PackManagerModalScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
+            FlowRow(
+                verticalArrangement = Arrangement.Center,
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
                     IconButton(onClick = onClose, modifier = Modifier.testTag("close_pack_manager_btn")) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
@@ -422,6 +456,38 @@ fun PackManagerModalScreen(
             }
         }
 
+        // Direct Local File Import Card (supports real .medo v2 ZIP, GZIP, and JSON banks)
+        item {
+            GlassCard(
+                isReadingSurface = true,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "واردسازی مستقیم فایل بانک سوالات (.medo) از حافظه گوشی:",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = tokens.accent,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "پشتیبانی کامل از فایل‌های واقعی خروجی دسکتاپ (.medo v2 ZIP، bank.json، questions.json و ساختارهای فشرده) با حفظ پیشرفت قبلی شما.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = tokens.textSecondary
+                    )
+                    MedoPrimaryButton(
+                        text = "انتخاب فایل بانک سوالات (.medo / .zip / .json) از حافظه",
+                        onClick = {
+                            openMedoFileLauncher.launch(arrayOf("*/*"))
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("import_local_medo_file_btn")
+                    )
+                }
+            }
+        }
+
+        // LAN Transfer Client Card (`medo share` port 8765 + v3 Delta Sync)
         item {
             GlassCard(modifier = Modifier.fillMaxWidth()) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -431,7 +497,7 @@ fun PackManagerModalScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "دریافت و به‌روزرسانی تفاضلی (Delta Update v3) از شبکه محلی (LAN):",
+                            text = "دریافت از سرور دسکتاپ (medo share پورت 8765) و به‌روزرسانی دلتا:",
                             style = MaterialTheme.typography.titleMedium,
                             color = tokens.accent,
                             fontWeight = FontWeight.Bold,
@@ -455,7 +521,7 @@ fun PackManagerModalScreen(
                             lanUrl = it
                             lanValidationError = null
                         },
-                        label = { Text("آدرس سرور دسکتاپ در شبکه Wi-Fi محلی") },
+                        label = { Text("آدرس سرور دسکتاپ در شبکه Wi-Fi محلی (مثلاً http://192.168.1.100:8765)") },
                         singleLine = true,
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
@@ -472,13 +538,14 @@ fun PackManagerModalScreen(
                     }
 
                     Text(
-                        text = "انتخاب سطوح محتوا برای دانلود (پیش‌فرض: همه - حدود ۲۶ مگابایت):",
+                        text = "انتخاب سطوح محتوا برای دانلود (پیش‌فرض: همه):",
                         style = MaterialTheme.typography.labelLarge,
                         color = tokens.textPrimary
                     )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(checked = selectText, onCheckedChange = { selectText = it })
@@ -502,7 +569,8 @@ fun PackManagerModalScreen(
                         Text(
                             text = "حالت آینه‌ای (Mirror Mode - حذف سوالات حذف‌شده در مبدا):",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = tokens.textSecondary
+                            color = tokens.textSecondary,
+                            modifier = Modifier.weight(1f)
                         )
                         Switch(
                             checked = mirrorMode,
@@ -510,12 +578,30 @@ fun PackManagerModalScreen(
                         )
                     }
 
-                    Row(
+                    FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         MedoPrimaryButton(
-                            text = "به‌روزرسانی همه بسته‌ها (Delta Sync v3)",
+                            text = "دریافت بانک از سرور دسکتاپ (پورت 8765)",
+                            onClick = {
+                                when (val res = MedoQrAndLanEngine.validateLanTransferUrl(lanUrl)) {
+                                    is MedoQrAndLanEngine.LanValidationResult.Valid -> {
+                                        lanValidationError = null
+                                        onDownloadFromLanServer(res.normalizedUrl)
+                                    }
+                                    is MedoQrAndLanEngine.LanValidationResult.Invalid -> {
+                                        lanValidationError = res.errorFa
+                                    }
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("download_lan_bank_btn")
+                        )
+                        MedoSecondaryButton(
+                            text = "به‌روزرسانی دلتا v3",
                             onClick = {
                                 when (val res = MedoQrAndLanEngine.validateLanTransferUrl(lanUrl)) {
                                     is MedoQrAndLanEngine.LanValidationResult.Valid -> {
@@ -530,11 +616,6 @@ fun PackManagerModalScreen(
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("update_all_packs_btn")
-                        )
-                        MedoSecondaryButton(
-                            text = "اسکن QR",
-                            onClick = onOpenQrScanner,
-                            modifier = Modifier.testTag("pack_open_qr_secondary_btn")
                         )
                     }
                 }
@@ -559,9 +640,9 @@ fun PackManagerModalScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Text(
                                 text = pack.categoryTitle,
@@ -599,6 +680,7 @@ fun PackManagerModalScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PdfExportModalScreen(
     state: MedoUiState,
@@ -646,7 +728,10 @@ fun PdfExportModalScreen(
                     color = tokens.textPrimary,
                     fontWeight = FontWeight.Bold
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     PdfExportMode.entries.forEach { mode ->
                         MedoPill(
                             text = mode.labelFa,
@@ -664,7 +749,10 @@ fun PdfExportModalScreen(
                     color = tokens.textPrimary,
                     fontWeight = FontWeight.Bold
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     PdfTextSize.entries.forEach { sz ->
                         MedoPill(
                             text = sz.labelFa,
@@ -683,13 +771,14 @@ fun PdfExportModalScreen(
                     Text(
                         text = "حالت صرفه‌جویی در مصرف جوهر (Ink-Saving):",
                         style = MaterialTheme.typography.bodyLarge,
-                        color = tokens.textPrimary
+                        color = tokens.textPrimary,
+                        modifier = Modifier.weight(1f)
                     )
                     Switch(checked = inkSaving, onCheckedChange = { inkSaving = it })
                 }
 
                 Text(
-                    text = "• تضمین عدم نشت پاسخ در حالت آزمون (دایره‌های یکسان، بدون تیک و بدون رنگ)\n• جدول کلید ۵ جفت در هر سطر در انتهای فصل\n• فشرده‌سازی خودکار سوالات فاقد پاسخ تشریحی («سوال‌های ۵ تا ۶: پاسخ تشریحی ثبت نشده»)",
+                    text = "• تضمین عدم نشت پاسخ در صفحات سوالات حالت آزمون (دایره‌های یکسان، بدون تیک و بدون رنگ)\n• جدول کلید ۵ جفت در هر سطر در صفحه مجزا پس از سوالات فصل\n• پاسخنامه تشریحی فصل در صفحات مجزا پس از جدول کلید با فشرده‌سازی خودکار سوالات فاقد تشریح («سوال‌های ۵ تا ۶: پاسخ تشریحی ثبت نشده»)",
                     style = MaterialTheme.typography.bodyMedium,
                     color = tokens.textSecondary
                 )
@@ -725,10 +814,16 @@ fun DiagnosticsModalScreen(
     var copiedNotice by remember { mutableStateOf(false) }
 
     val scanStats = MedoQrAndLanEngine.lastScanStats
-    val reportText = remember(state.allQuestions.size, state.installedPacks.size, state.progressByQuestionId.size, scanStats) {
+    val reportText = remember(
+        state.allQuestions.size,
+        state.installedPacks.size,
+        state.progressByQuestionId.size,
+        state.lastAutoBackupStatusFa,
+        scanStats
+    ) {
         val baseReport = DiagnosticsLogger.buildDiagnosticsReport(
             context = context,
-            appVersion = "2.0.0-next (Medo Next)",
+            appVersion = "201.0 (Medo Next)",
             totalQuestions = state.allQuestions.size,
             totalCategories = state.categoryNodes.size,
             installedPacksSummary = state.installedPacks.joinToString(", ") { "${it.packId}(${it.version})" },
@@ -736,6 +831,9 @@ fun DiagnosticsModalScreen(
         )
         buildString {
             append(baseReport)
+            appendLine("--- وضعیت پروتکل انتقال و پشتیبان‌گیری ---")
+            appendLine("وضعیت کلاینت انتقال: ${MedoQrAndLanEngine.TRANSFER_VERIFICATION_NOTE}")
+            appendLine("آخرین پشتیبان خودکار روزانه: ${state.lastAutoBackupStatusFa}")
             appendLine("--- وضعیت آخرین نشست اسکن QR (ZXing) ---")
             appendLine("فریم‌های بررسی‌شده: ${scanStats.framesAnalysed} | تلاش‌های رمزگشایی: ${scanStats.decodeAttempts}")
             appendLine("چرخش‌های آزمایش‌شده: ${scanStats.rotationsTried} | آخرین وضعیت: ${scanStats.lastFailureReason}")
@@ -755,7 +853,10 @@ fun DiagnosticsModalScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
                 IconButton(onClick = onClose, modifier = Modifier.testTag("close_diagnostics_btn")) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,

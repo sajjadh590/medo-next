@@ -1,13 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false" />
-    <!-- Allow cleartext HTTP strictly for private LAN / localhost pack transfer -->
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">localhost</domain>
-        <domain includeSubdomains="true">127.0.0.1</domain>
-        <domain includeSubdomains="true">10.0.0.1</domain>
-        <domain includeSubdomains="true">192.168.1.1</domain>
-        <domain includeSubdomains="true">192.168.1.100</domain>
-        <domain includeSubdomains="true">medo.local</domain>
-    </domain-config>
+    <!--
+      Android's XML <domain> tag only matches exact hostnames/IP literals and does not support
+      RFC1918 CIDR blocks (192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12).
+      Therefore cleartext HTTP is permitted at the platform XML layer so any local LAN IP
+      assigned to the desktop `medo share` server works, while `MedoQrAndLanEngine.openValidatedLanConnection`
+      enforces a strict RFC1918 + localhost allowlist in code before any socket is opened.
+    -->
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

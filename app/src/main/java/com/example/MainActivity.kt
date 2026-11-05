@@ -11,17 +11,23 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Assignment
@@ -77,6 +83,7 @@ import com.example.ui.screens.PracticeScreen
 import com.example.ui.screens.QrScannerModalScreen
 import com.example.ui.screens.SettingsModalScreen
 import com.example.ui.screens.SpacedRepetitionReviewScreen
+import com.example.ui.screens.releaseCameraProviderSafely
 import com.example.ui.theme.LocalMedoTheme
 import com.example.ui.theme.MedoNextTheme
 import com.example.util.PersianTextUtils
@@ -105,6 +112,9 @@ fun MedoAppRoot(
     val context = LocalContext.current
 
     BackHandler(enabled = state.activeModal != OverlayModal.NONE || state.currentTab != MainNavTab.HOME) {
+        if (state.activeModal == OverlayModal.QR_SCANNER) {
+            releaseCameraProviderSafely(context)
+        }
         if (state.activeModal != OverlayModal.NONE) {
             viewModel.closeModal()
         } else {
@@ -130,10 +140,16 @@ fun MedoAppRoot(
             ?: state.allQuestions.firstOrNull()
     }
 
+    val modalSafeModifier = Modifier
+        .fillMaxSize()
+        .statusBarsPadding()
+        .navigationBarsPadding()
+        .windowInsetsPadding(WindowInsets.safeDrawing)
+
     MedoProceduralBackground {
         when (state.activeModal) {
             OverlayModal.SETTINGS -> {
-                Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                Box(modifier = modalSafeModifier) {
                     SettingsModalScreen(
                         state = state,
                         onUpdateSettings = viewModel::updateSettings,
@@ -144,10 +160,12 @@ fun MedoAppRoot(
                 }
             }
             OverlayModal.PACK_MANAGER -> {
-                Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                Box(modifier = modalSafeModifier) {
                     PackManagerModalScreen(
                         state = state,
                         onOpenQrScanner = { viewModel.openModal(OverlayModal.QR_SCANNER) },
+                        onDownloadFromLanServer = { url -> viewModel.downloadAndImportFromLanServer(context, url) },
+                        onImportLocalBankUri = { uri -> viewModel.importMedoBankFromUri(context, uri) },
                         onTriggerDeltaUpdate = viewModel::applySimulatedV3DeltaUpdate,
                         onDeletePack = viewModel::deleteInstalledPack,
                         onClose = viewModel::closeModal
@@ -155,15 +173,18 @@ fun MedoAppRoot(
                 }
             }
             OverlayModal.QR_SCANNER -> {
-                Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                Box(modifier = modalSafeModifier) {
                     QrScannerModalScreen(
                         onConnectValidatedUrl = viewModel::onQrLanUrlValidatedAndConnected,
-                        onClose = viewModel::closeModal
+                        onClose = {
+                            releaseCameraProviderSafely(context)
+                            viewModel.closeModal()
+                        }
                     )
                 }
             }
             OverlayModal.DIAGNOSTICS -> {
-                Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                Box(modifier = modalSafeModifier) {
                     DiagnosticsModalScreen(
                         state = state,
                         onClose = viewModel::closeModal
@@ -171,7 +192,7 @@ fun MedoAppRoot(
                 }
             }
             OverlayModal.PDF_EXPORT -> {
-                Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                Box(modifier = modalSafeModifier) {
                     PdfExportModalScreen(
                         state = state,
                         onExportPdf = { config -> viewModel.generateAndSharePdf(context, config) },
@@ -180,7 +201,7 @@ fun MedoAppRoot(
                 }
             }
             OverlayModal.NODE_QUESTION_LIST -> {
-                Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                Box(modifier = modalSafeModifier) {
                     NodeQuestionListModal(
                         state = state,
                         filteredQuestions = filteredQuestions,
@@ -196,10 +217,14 @@ fun MedoAppRoot(
                 val q = activePracticeQuestion
                 val prog = q?.let { state.progressByQuestionId[it.siteQuestionId] }
                 val highlights = com.example.domain.PackDeltaPlanner.parseJsonStringArray(prog?.highlightsJson)
-                Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                val resolvedLessonHtml = state.currentPracticeLessonHtml
+                    ?: q?.lessonHtml
+                    ?: q?.explanationHtml
+                    ?: "<p>درسنامه‌ای ثبت نشده است.</p>"
+                Box(modifier = modalSafeModifier) {
                     LessonReaderDialogScreen(
                         questionTitle = q?.siteQuestionId ?: "",
-                        lessonHtml = q?.lessonHtml ?: q?.explanationHtml ?: "<p>درسنامه‌ای ثبت نشده است.</p>",
+                        lessonHtml = resolvedLessonHtml,
                         savedHighlights = highlights,
                         onAddHighlight = { phrase ->
                             if (q != null) viewModel.addHighlightToQuestion(q.siteQuestionId, phrase)
@@ -213,7 +238,7 @@ fun MedoAppRoot(
                 }
             }
             OverlayModal.MIND_MAP_VIEWER -> {
-                Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                Box(modifier = modalSafeModifier) {
                     MindMapViewerModal(
                         mediaHash = state.activeMindMapHash,
                         titleFa = state.activeMindMapTitle,
@@ -255,6 +280,7 @@ fun MedoAppRoot(
                                 color = tokens.accent.copy(alpha = 0.2f),
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .wrapContentHeight()
                                     .padding(horizontal = 16.dp, vertical = 4.dp)
                                     .clip(RoundedCornerShape(12.dp))
                                     .clickable { viewModel.clearStatusBanner() }
@@ -289,6 +315,7 @@ fun MedoAppRoot(
                                             state = state,
                                             questionsList = filteredQuestions.ifEmpty { state.allQuestions },
                                             currentQuestion = activePracticeQuestion,
+                                            currentLessonHtml = state.currentPracticeLessonHtml ?: activePracticeQuestion.lessonHtml,
                                             currentProgress = state.progressByQuestionId[activePracticeQuestion.siteQuestionId],
                                             onSelectOption = { optIdx ->
                                                 viewModel.submitPracticeOption(activePracticeQuestion, optIdx)
@@ -346,6 +373,12 @@ fun MedoAppRoot(
     }
 }
 
+/**
+ * Top bar with explicit `statusBarsPadding()` and `windowInsetsPadding(WindowInsets.statusBars)`
+ * so it NEVER overlaps the Android notification/status bar or camera cutout.
+ * Uses `FlowRow` so the title, current tab pill, and action icons wrap cleanly at any font scale.
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MedoGlassTopBar(
     currentTab: MainNavTab,
@@ -360,18 +393,24 @@ private fun MedoGlassTopBar(
         color = tokens.surfaceTint.copy(alpha = tokens.surfaceAlpha),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .statusBarsPadding()
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 6.dp)
+            .wrapContentHeight()
             .clip(RoundedCornerShape(22.dp))
             .border(1.dp, Color.White.copy(alpha = tokens.borderAlpha), RoundedCornerShape(22.dp))
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
+        FlowRow(
+            verticalArrangement = Arrangement.Center,
             horizontalArrangement = Arrangement.SpaceBetween,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 8.dp)
+                .padding(horizontal = 12.dp, vertical = 6.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(vertical = 4.dp)
+            ) {
                 Text(
                     text = "Medo Next",
                     style = MaterialTheme.typography.titleLarge,
@@ -456,8 +495,10 @@ private fun MedoGlassBottomBar(
         color = tokens.surfaceTint.copy(alpha = (tokens.surfaceAlpha + 0.1f).coerceAtMost(0.95f)),
         modifier = Modifier
             .fillMaxWidth()
+            .navigationBarsPadding()
             .windowInsetsPadding(WindowInsets.navigationBars)
             .padding(horizontal = 16.dp, vertical = 8.dp)
+            .wrapContentHeight()
             .clip(RoundedCornerShape(26.dp))
             .border(1.dp, Color.White.copy(alpha = tokens.borderAlpha), RoundedCornerShape(26.dp))
     ) {
@@ -466,7 +507,7 @@ private fun MedoGlassBottomBar(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 6.dp, horizontal = 8.dp)
+                .padding(vertical = 6.dp, horizontal = 6.dp)
         ) {
             items.forEach { (tab, icon) ->
                 val selected = currentTab == tab
@@ -477,7 +518,7 @@ private fun MedoGlassBottomBar(
                         .clip(RoundedCornerShape(16.dp))
                         .background(if (selected) tokens.accent.copy(alpha = 0.2f) else Color.Transparent)
                         .clickable { onSelectTab(tab) }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
                         .testTag("bottom_nav_${tab.name}")
                 ) {
                     Icon(
@@ -490,7 +531,8 @@ private fun MedoGlassBottomBar(
                         text = tab.labelFa,
                         style = MaterialTheme.typography.labelMedium,
                         color = if (selected) tokens.accent else tokens.textSecondary,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1
                     )
                 }
             }

@@ -1,9 +1,13 @@
 package com.example.ui
 
 import android.app.Application
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Environment
+import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -43,6 +47,9 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 enum class MainNavTab(val labelFa: String) {
     HOME("خانه"),
@@ -109,7 +116,7 @@ data class MedoUiState(
     val searchResults: List<QuestionEntity> = emptyList(),
     val lastSearchLatencyMs: Long = 0L,
 
-    // Database collections
+    // Database collections (allQuestions uses lightweight projection with lazy lesson loading)
     val categoryNodes: List<CategoryNodeEntity> = emptyList(),
     val allQuestions: List<QuestionEntity> = emptyList(),
     val crossRefs: List<QuestionNodeCrossRef> = emptyList(),
@@ -125,6 +132,7 @@ data class MedoUiState(
     val activeSortOrder: QuestionSortOrder = QuestionSortOrder.ORIGINAL,
     val nodeSearchQuery: String = "",
     val currentPracticeQuestionId: String? = "q_1001",
+    val currentPracticeLessonHtml: String? = null,
     val immediateFeedbackMode: Boolean = true,
     val revealedInEndModeIds: Set<String> = emptySet(),
     val questionOpenedTimestampMs: Long = System.currentTimeMillis(),
@@ -136,8 +144,9 @@ data class MedoUiState(
     val activeMindMapHash: String = "mm_demo_diagram_01",
     val activeMindMapTitle: String = "[نمونه آزمایشی] نمودار درختی آزمایشی ۱",
 
-    // Pack Transfer & PDF status banner
+    // Pack Transfer, Auto-Backup & PDF status
     val connectedLanServerUrl: String = "http://192.168.1.100:8765",
+    val lastAutoBackupStatusFa: String = "هنوز پشتیبان‌گیری خودکاری ثبت نشده است",
     val statusBannerMessage: String? = null,
     val lastPdfPlanResult: MedoPdfEngine.PdfPlanResult? = null,
     val lastExportedPdfPath: String? = null
@@ -157,6 +166,7 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
     init {
         DiagnosticsLogger.installCrashHandler(application)
         DiagnosticsLogger.logEvent("INIT", "راه‌اندازی موتور داده و رابط شیشه‌ای Medo Next")
+        DiagnosticsLogger.logEvent("TRANSFER_STATUS", MedoQrAndLanEngine.TRANSFER_VERIFICATION_NOTE)
         loadPersistedPreferences()
         observeDatabaseStreams()
         seedDatabaseIfDebugOnly()
@@ -185,6 +195,8 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
             setOf("cat_dastyari", "cat_dastyari_internal", "cat_pre_intern", "cat_talifi")
         ).orEmpty()
         val lastPracticeQ = prefs.getString("last_practice_q", "q_1001")
+        val lastBackupStatus = prefs.getString("last_auto_backup_status_fa", "هنوز پشتیبان‌گیری خودکاری ثبت نشده است")
+            ?: "هنوز پشتیبان‌گیری خودکاری ثبت نشده است"
 
         _uiState.update { state ->
             state.copy(
@@ -203,7 +215,8 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
                     dailyAutoBackupToDocuments = dailyAutoBackup
                 ),
                 expandedNodeIds = expandedRaw,
-                currentPracticeQuestionId = lastPracticeQ
+                currentPracticeQuestionId = lastPracticeQ,
+                lastAutoBackupStatusFa = lastBackupStatus
             )
         }
     }
@@ -212,7 +225,7 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             combine(
                 dao.observeAllCategoryNodes(),
-                dao.observeAllQuestions(),
+                dao.observeAllQuestionsLightweight(),
                 dao.observeAllCrossRefs(),
                 dao.observeAllProgress(),
                 dao.observeActiveClozeCards()
@@ -220,10 +233,12 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
                 Quintuple(nodes, questions, refs, progressList, cloze)
             }.collect { (nodes, questions, refs, progressList, cloze) ->
                 val progressMap = progressList.associateBy { it.siteQuestionId }
+                val resolvedPracticeId = _uiState.value.currentPracticeQuestionId
+                    ?.takeIf { id -> questions.any { it.siteQuestionId == id } }
+                    ?: questions.firstOrNull()?.siteQuestionId
+                val lazyLesson = resolvedPracticeId?.let { dao.getLessonHtmlById(it) }
+
                 _uiState.update { current ->
-                    val resolvedPracticeId = current.currentPracticeQuestionId
-                        ?.takeIf { id -> questions.any { it.siteQuestionId == id } }
-                        ?: questions.firstOrNull()?.siteQuestionId
                     current.copy(
                         isInitialized = true,
                         categoryNodes = nodes,
@@ -231,7 +246,8 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
                         crossRefs = refs,
                         progressByQuestionId = progressMap,
                         clozeCards = cloze,
-                        currentPracticeQuestionId = resolvedPracticeId
+                        currentPracticeQuestionId = resolvedPracticeId,
+                        currentPracticeLessonHtml = lazyLesson
                     )
                 }
             }
@@ -266,8 +282,8 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
                 DiagnosticsLogger.logEvent("RELEASE_EMPTY", "نسخه نهایی (Release): شروع با بانک خالی و آماده واردسازی فایل .medo")
                 return@launch
             }
-            val existingQuestions = dao.getAllQuestions()
-            if (existingQuestions.isEmpty()) {
+            val existingCount = dao.getQuestionCount()
+            if (existingCount == 0) {
                 val startMs = System.currentTimeMillis()
                 val bundle = SyntheticBankSeedAndImporter.buildInitialClinicalSeed(todayEpochDay)
                 dao.atomicImportBankChunk(
@@ -298,6 +314,8 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
                         sm2DueEpochDay = todayEpochDay
                     )
                 )
+                val lazyLesson = dao.getLessonHtmlById("q_1001")
+                _uiState.update { it.copy(currentPracticeLessonHtml = lazyLesson) }
                 val elapsed = System.currentTimeMillis() - startMs
                 DiagnosticsLogger.logEvent("SEED_DEMO", "بانک آزمایشی Debug با ${bundle.questions.size} سوال در ${elapsed}ms بارگذاری شد")
             }
@@ -305,7 +323,8 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Section E: Optional daily automatic progress export to the Documents folder (`Documents/MedoNext/`).
+     * Item 5: Daily automatic progress export through MediaStore on Android 10+ (with SAF/app-scoped fallback),
+     * never crashing, logging success/failure to DiagnosticsLogger, and recording last backup time in Settings.
      */
     private fun runDailyAutoBackupIfDue(context: Context) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -313,26 +332,61 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
             val lastBackupEpochDay = prefs.getLong("last_auto_backup_epoch_day", 0L)
             if (todayEpochDay > lastBackupEpochDay) {
                 performDailyAutoBackupToDocuments(context)
-                prefs.edit().putLong("last_auto_backup_epoch_day", todayEpochDay).apply()
             }
         }
     }
 
-    suspend fun performDailyAutoBackupToDocuments(context: Context): File? = withContext(Dispatchers.IO) {
+    suspend fun performDailyAutoBackupToDocuments(context: Context): Boolean = withContext(Dispatchers.IO) {
+        val timestampStr = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
         return@withContext try {
             val allProgress = dao.getAllProgress()
             val json = ProgressBackupManager.exportProgressToJson(allProgress)
-            val docsRoot = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
-                ?: File(context.filesDir, "Documents")
-            val medoDocsDir = File(docsRoot, "MedoNext")
-            medoDocsDir.mkdirs()
-            val outFile = File(medoDocsDir, "medo-progress-daily-$todayEpochDay.json")
-            outFile.writeText(json)
-            DiagnosticsLogger.logEvent("AUTO_BACKUP", "پشتیبان خودکار روزانه در Documents/MedoNext ذخیره شد (${allProgress.size} رکورد)")
-            outFile
+            val fileName = "medo-progress-daily-$todayEpochDay.json"
+            var savedViaMediaStore = false
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                runCatching {
+                    val resolver = context.contentResolver
+                    val contentValues = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                        put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOCUMENTS + "/MedoNext")
+                    }
+                    val collectionUri = MediaStore.Files.getContentUri("external")
+                    val itemUri = resolver.insert(collectionUri, contentValues)
+                    if (itemUri != null) {
+                        resolver.openOutputStream(itemUri)?.use { out ->
+                            out.write(json.toByteArray(Charsets.UTF_8))
+                            out.flush()
+                        }
+                        savedViaMediaStore = true
+                    }
+                }
+            }
+
+            if (!savedViaMediaStore) {
+                val docsRoot = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+                    ?: File(context.filesDir, "Documents")
+                val medoDocsDir = File(docsRoot, "MedoNext")
+                medoDocsDir.mkdirs()
+                File(medoDocsDir, fileName).writeText(json, Charsets.UTF_8)
+            }
+
+            val methodLabel = if (savedViaMediaStore) "MediaStore Documents/MedoNext" else "App Documents/MedoNext"
+            val statusFa = "موفق در $timestampStr ($methodLabel - ${allProgress.size} رکورد)"
+            prefs.edit()
+                .putLong("last_auto_backup_epoch_day", todayEpochDay)
+                .putString("last_auto_backup_status_fa", statusFa)
+                .apply()
+            _uiState.update { it.copy(lastAutoBackupStatusFa = statusFa) }
+            DiagnosticsLogger.logEvent("AUTO_BACKUP_OK", "پشتیبان خودکار روزانه ذخیره شد: $statusFa")
+            true
         } catch (e: Exception) {
+            val errStatusFa = "ناموفق در $timestampStr (${e.javaClass.simpleName})"
+            prefs.edit().putString("last_auto_backup_status_fa", errStatusFa).apply()
+            _uiState.update { it.copy(lastAutoBackupStatusFa = errStatusFa) }
             DiagnosticsLogger.logEvent("AUTO_BACKUP_ERR", "خطا در پشتیبان خودکار روزانه: ${e.javaClass.simpleName}")
-            null
+            false
         }
     }
 
@@ -348,6 +402,16 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openModal(modal: OverlayModal) {
+        if (modal == OverlayModal.LESSON_READER) {
+            val qId = _uiState.value.currentPracticeQuestionId
+            if (qId != null) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    val lesson = dao.getLessonHtmlById(qId)
+                    _uiState.update { it.copy(currentPracticeLessonHtml = lesson, activeModal = modal) }
+                }
+                return
+            }
+        }
         _uiState.update { it.copy(activeModal = modal) }
     }
 
@@ -365,8 +429,88 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 connectedLanServerUrl = validatedUrl,
                 activeModal = OverlayModal.PACK_MANAGER,
-                statusBannerMessage = "اتصال به آدرس محلی $validatedUrl برقرار شد. بسته‌های مورد نظر را انتخاب کنید."
+                statusBannerMessage = "در حال دریافت بانک سوالات از آدرس محلی $validatedUrl ..."
             )
+        }
+        downloadAndImportFromLanServer(getApplication(), validatedUrl)
+    }
+
+    /**
+     * Downloads the `.medo` v2 bundle from the desktop `medo share` server (`http://<LAN_IP>:8765`)
+     * and atomically imports it into Room SQLite.
+     */
+    fun downloadAndImportFromLanServer(context: Context, lanUrl: String, optionalPin: String? = null) {
+        viewModelScope.launch(Dispatchers.IO) {
+            MedoQrAndLanEngine.bindProcessToWifiIfAvailable(context)
+            try {
+                val res = MedoQrAndLanEngine.downloadBankFromLanServer(lanUrl, optionalPin)
+                res.fold(
+                    onSuccess = { bytes ->
+                        val parsed = SyntheticBankSeedAndImporter.atomicImportV2ArchiveIntoDao(bytes, dao, todayEpochDay)
+                        val firstQId = parsed.questions.firstOrNull()?.siteQuestionId
+                        val firstLesson = firstQId?.let { dao.getLessonHtmlById(it) }
+                        val allNodeIds = parsed.nodes.map { it.id }.toSet()
+                        _uiState.update {
+                            it.copy(
+                                expandedNodeIds = allNodeIds,
+                                currentPracticeQuestionId = firstQId ?: it.currentPracticeQuestionId,
+                                currentPracticeLessonHtml = firstLesson,
+                                statusBannerMessage = "✓ بانک سوالات از سرور دسکتاپ دریافت و نصب شد (${parsed.questions.size} سوال در ${parsed.nodes.size} مبحث)"
+                            )
+                        }
+                        DiagnosticsLogger.logEvent(
+                            "LAN_IMPORT_OK",
+                            "واردسازی موفق از سرور دسکتاپ: ${parsed.questions.size} سوال، ${parsed.nodes.size} مبحث"
+                        )
+                    },
+                    onFailure = { err ->
+                        _uiState.update {
+                            it.copy(statusBannerMessage = err.message ?: "خطا در دریافت فایل از سرور دسکتاپ")
+                        }
+                    }
+                )
+            } catch (e: Exception) {
+                val mapped = MedoQrAndLanEngine.mapTransferError(throwable = e)
+                _uiState.update { it.copy(statusBannerMessage = mapped.fullMessageFa) }
+                DiagnosticsLogger.logEvent("LAN_IMPORT_ERR", "خطای واردسازی از شبکه: ${e.message}")
+            } finally {
+                MedoQrAndLanEngine.unbindProcessFromNetwork(context)
+            }
+        }
+    }
+
+    /**
+     * Imports a user-selected `.medo` / `.zip` / `.json` bank file directly from device storage
+     * (via `ActivityResultContracts.OpenDocument`).
+     */
+    fun importMedoBankFromUri(context: Context, uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: throw IllegalArgumentException("فایل انتخاب‌شده قابل خواندن نیست")
+                val parsed = SyntheticBankSeedAndImporter.atomicImportV2ArchiveIntoDao(bytes, dao, todayEpochDay)
+                val firstQId = parsed.questions.firstOrNull()?.siteQuestionId
+                val firstLesson = firstQId?.let { dao.getLessonHtmlById(it) }
+                val allNodeIds = parsed.nodes.map { it.id }.toSet()
+                prefs.edit().putStringSet("expanded_node_ids", allNodeIds).apply()
+                _uiState.update {
+                    it.copy(
+                        expandedNodeIds = allNodeIds,
+                        currentPracticeQuestionId = firstQId ?: it.currentPracticeQuestionId,
+                        currentPracticeLessonHtml = firstLesson,
+                        statusBannerMessage = "✓ فایل بانک سوالات با موفقیت وارد شد (${parsed.questions.size} سوال و ${parsed.nodes.size} مبحث)"
+                    )
+                }
+                DiagnosticsLogger.logEvent(
+                    "FILE_IMPORT_OK",
+                    "واردسازی فایل بانک از حافظه: ${parsed.questions.size} سوال، ${parsed.nodes.size} مبحث"
+                )
+            } catch (e: Exception) {
+                DiagnosticsLogger.logEvent("FILE_IMPORT_ERR", "خطا در واردسازی فایل بانک: ${e.message}")
+                _uiState.update {
+                    it.copy(statusBannerMessage = "خطا در خواندن فایل بانک (.medo): ${e.localizedMessage ?: "ساختار فایل نامعتبر است"}")
+                }
+            }
         }
     }
 
@@ -445,13 +589,17 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectQuestionForPractice(questionId: String) {
         prefs.edit().putString("last_practice_q", questionId).apply()
-        _uiState.update {
-            it.copy(
-                currentPracticeQuestionId = questionId,
-                currentTab = MainNavTab.PRACTICE,
-                activeModal = OverlayModal.NONE,
-                questionOpenedTimestampMs = System.currentTimeMillis()
-            )
+        viewModelScope.launch(Dispatchers.IO) {
+            val lazyLesson = dao.getLessonHtmlById(questionId)
+            _uiState.update {
+                it.copy(
+                    currentPracticeQuestionId = questionId,
+                    currentPracticeLessonHtml = lazyLesson,
+                    currentTab = MainNavTab.PRACTICE,
+                    activeModal = OverlayModal.NONE,
+                    questionOpenedTimestampMs = System.currentTimeMillis()
+                )
+            }
         }
     }
 
@@ -749,7 +897,7 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
     // PDF Export & Share
     fun generateAndSharePdf(context: Context, config: PdfExportConfig) {
         viewModelScope.launch(Dispatchers.IO) {
-            val questions = _uiState.value.allQuestions
+            val questions = dao.getAllQuestions()
             val exportsDir = File(context.cacheDir, "exports")
             exportsDir.mkdirs()
             val pdfFile = File(exportsDir, "medo_next_export_${config.mode.name.lowercase()}.pdf")
@@ -780,7 +928,6 @@ class MedoViewModel(application: Application) : AndroidViewModel(application) {
             exportsDir.mkdirs()
             val jsonFile = File(exportsDir, "medo_progress_backup.json")
             jsonFile.writeText(json)
-            // Also write to Documents/MedoNext if enabled
             performDailyAutoBackupToDocuments(context)
             DiagnosticsLogger.logEvent("PROGRESS_EXPORT", "پشتیبان پیشرفت (${allProgress.size} رکورد) صادر شد")
             _uiState.update {

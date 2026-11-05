@@ -19,6 +19,37 @@ interface MedoDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCategoryNodes(nodes: List<CategoryNodeEntity>)
 
+    /**
+     * Lightweight question stream for Home tree, filters, and lists:
+     * projects `NULL AS lessonHtml` so 20,000-question banks keep heap well under 150 MB,
+     * while loading `lessonHtml` lazily per question via [getLessonHtmlById] or [getQuestionById].
+     */
+    @Query(
+        """
+        SELECT siteQuestionId, contentHash, stemHtml, optionsJson, optionVotesJson,
+               correctOptionIndex, explanationHtml, NULL AS lessonHtml,
+               mindMapMediaHash, stemImageMediaHash, drugSafetyMetaJson,
+               normalizedSearchText, hasKey, hasLesson, hasMindMap,
+               isTrap, removedUpstream, packId, orderInNode
+        FROM questions
+        ORDER BY orderInNode ASC
+        """
+    )
+    fun observeAllQuestionsLightweight(): Flow<List<QuestionEntity>>
+
+    @Query(
+        """
+        SELECT siteQuestionId, contentHash, stemHtml, optionsJson, optionVotesJson,
+               correctOptionIndex, explanationHtml, NULL AS lessonHtml,
+               mindMapMediaHash, stemImageMediaHash, drugSafetyMetaJson,
+               normalizedSearchText, hasKey, hasLesson, hasMindMap,
+               isTrap, removedUpstream, packId, orderInNode
+        FROM questions
+        ORDER BY orderInNode ASC
+        """
+    )
+    suspend fun getAllQuestionsLightweight(): List<QuestionEntity>
+
     @Query("SELECT * FROM questions ORDER BY orderInNode ASC")
     fun observeAllQuestions(): Flow<List<QuestionEntity>>
 
@@ -27,6 +58,12 @@ interface MedoDao {
 
     @Query("SELECT * FROM questions WHERE siteQuestionId = :id LIMIT 1")
     suspend fun getQuestionById(id: String): QuestionEntity?
+
+    @Query("SELECT lessonHtml FROM questions WHERE siteQuestionId = :id LIMIT 1")
+    suspend fun getLessonHtmlById(id: String): String?
+
+    @Query("SELECT COUNT(*) FROM questions")
+    suspend fun getQuestionCount(): Int
 
     @Query(
         """
@@ -41,7 +78,12 @@ interface MedoDao {
 
     @Query(
         """
-        SELECT * FROM questions
+        SELECT siteQuestionId, contentHash, stemHtml, optionsJson, optionVotesJson,
+               correctOptionIndex, explanationHtml, NULL AS lessonHtml,
+               mindMapMediaHash, stemImageMediaHash, drugSafetyMetaJson,
+               normalizedSearchText, hasKey, hasLesson, hasMindMap,
+               isTrap, removedUpstream, packId, orderInNode
+        FROM questions
         WHERE normalizedSearchText LIKE '%' || :normalizedQuery || '%'
         ORDER BY orderInNode ASC
         LIMIT 250
@@ -137,11 +179,23 @@ interface MedoDao {
         mediaBlobs: List<MediaBlobEntity>,
         clozeCards: List<ClozeCardEntity>
     ) {
-        if (nodes.isNotEmpty()) insertCategoryNodes(nodes)
-        if (questions.isNotEmpty()) insertQuestions(questions)
-        if (crossRefs.isNotEmpty()) insertQuestionNodeCrossRefs(crossRefs)
-        if (packs.isNotEmpty()) insertPacks(packs)
-        if (mediaBlobs.isNotEmpty()) insertMediaBlobs(mediaBlobs)
-        if (clozeCards.isNotEmpty()) insertClozeCards(clozeCards)
+        if (nodes.isNotEmpty()) {
+            nodes.chunked(1000).forEach { insertCategoryNodes(it) }
+        }
+        if (questions.isNotEmpty()) {
+            questions.chunked(1500).forEach { insertQuestions(it) }
+        }
+        if (crossRefs.isNotEmpty()) {
+            crossRefs.chunked(3000).forEach { insertQuestionNodeCrossRefs(it) }
+        }
+        if (packs.isNotEmpty()) {
+            insertPacks(packs)
+        }
+        if (mediaBlobs.isNotEmpty()) {
+            mediaBlobs.chunked(500).forEach { insertMediaBlobs(it) }
+        }
+        if (clozeCards.isNotEmpty()) {
+            clozeCards.chunked(1500).forEach { insertClozeCards(it) }
+        }
     }
 }

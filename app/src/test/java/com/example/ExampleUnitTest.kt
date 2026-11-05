@@ -1,8 +1,10 @@
 package com.example
 
 import android.content.Context
+import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.InstalledPackEntity
+import com.example.data.MedoDatabase
 import com.example.data.QuestionEntity
 import com.example.data.SyntheticBankSeedAndImporter
 import com.example.domain.CategoryTreeFlattener
@@ -22,6 +24,7 @@ import com.example.util.PersianTextUtils
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -31,10 +34,16 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.ConnectException
+import java.net.InetAddress
 import java.net.NoRouteToHostException
+import java.net.ServerSocket
 import java.net.SocketTimeoutException
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+import kotlin.concurrent.thread
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -239,15 +248,45 @@ class ExampleUnitTest {
         assertTrue(reimported.first().bookmarked)
     }
 
-    // 8. Medo v2 ZIP Round-Trip & Atomic Import Rollback on Corrupt Input Test
+    // 8. Medo v2 ZIP Round-Trip, Snake-Case Desktop Bank Compatibility & Atomic Import Rollback
     @Test
-    fun `Medo v2 ZIP round trip succeeds and corrupt archive throws before modifying state`() {
+    fun `Medo v2 ZIP round trip snake_case desktop bank format and corrupt archive rollback work`() {
         val original = SyntheticBankSeedAndImporter.buildInitialClinicalSeed()
         val zipBytes = SyntheticBankSeedAndImporter.buildMedoV2ZipBytes(original)
         assertTrue(zipBytes.isNotEmpty())
         val parsed = SyntheticBankSeedAndImporter.parseMedoV2ZipBytes(zipBytes)
         assertEquals(original.nodes.size, parsed.nodes.size)
         assertEquals(original.questions.size, parsed.questions.size)
+
+        // Verify desktop Python exporter style bank.json with snake_case keys & auto-synthesized category tree
+        val snakeCaseBankJson = """
+            {
+              "version": 2,
+              "questions": [
+                {
+                  "question_id": "desk_9001",
+                  "question_html": "<p>[نمونه آزمایشی] بیمار با درد قفسه سینه مراجعه کرده است.</p>",
+                  "choices": ["گزینه اول", "گزینه دوم", "گزینه سوم", "گزینه چهارم"],
+                  "correct_answer": 2,
+                  "answer_html": "<p>پاسخ تشریحی دسکتاپ</p>",
+                  "lesson_html": "<p>درسنامه دسکتاپ</p>",
+                  "category_path": "دستیاری > داخلی > ریه"
+                }
+              ]
+            }
+        """.trimIndent()
+        val desktopZipBaos = ByteArrayOutputStream()
+        ZipOutputStream(desktopZipBaos).use { zos ->
+            zos.putNextEntry(ZipEntry("bank.json"))
+            zos.write(snakeCaseBankJson.toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+        }
+        val parsedDesktop = SyntheticBankSeedAndImporter.parseMedoV2ZipBytes(desktopZipBaos.toByteArray())
+        assertEquals(1, parsedDesktop.questions.size)
+        assertEquals("desk_9001", parsedDesktop.questions.first().siteQuestionId)
+        assertNotNull(parsedDesktop.questions.first().correctOptionIndex)
+        assertTrue("Category tree must be auto-synthesized from category_path", parsedDesktop.nodes.size >= 3)
+        assertTrue(parsedDesktop.crossRefs.any { it.siteQuestionId == "desk_9001" })
 
         // Verify corrupt/truncated archive fails cleanly without partial parse
         var threwOnCorrupt = false
@@ -259,9 +298,9 @@ class ExampleUnitTest {
         assertTrue("Corrupt archive must fail before touching database", threwOnCorrupt)
     }
 
-    // 9. PdfPlan Key Table Sizes, Exam No-Leak Guarantee & Sample Exam/Study PDF File Generation
+    // 9. PdfPlan Key Table Sizes, Exam-Mode Separate Key & Explanations Pages, Zero Answer Leak on Question Pages
     @Test
-    fun `PdfPlan key table sizes for 1 9 10 37 and 200 questions exam no-leak and sample PDF files generated`() {
+    fun `PdfPlan key table sizes exam mode zero leak on question pages plus separate answer key and explanation pages`() {
         val seed = SyntheticBankSeedAndImporter.buildInitialClinicalSeed()
         val seedQuestion = seed.questions.first()
         fun makeQuestions(n: Int): List<QuestionEntity> = (1..n).map { i ->
@@ -283,9 +322,20 @@ class ExampleUnitTest {
         assertTrue(expPlan.any { it.isCompressedMissingRange && it.headerLabel.contains("سوال‌های ۲ تا ۹: پاسخ تشریحی ثبت نشده") })
         assertFalse(expPlan.any { it.bodyText.contains("کلیک") })
 
+        // Follow-Up 2 Item 3:
+        // In exam mode:
+        // (a) Question pages must NOT leak anything (no option marked correct on question pages)
+        // (b) After the questions of the chapter, the PDF MUST still contain the answer key table (5 pairs per row)
+        //     and then the grouped explanations on separate pages.
         val examPlan = MedoPdfEngine.createPlan(qs10, PdfExportConfig(mode = PdfExportMode.EXAM))
         val allPlannedOptions = examPlan.questionPages.flatten().flatMap { it.options }
-        assertTrue(allPlannedOptions.none { it.isMarkedCorrectInStudyMode })
+        assertTrue("Exam mode question pages must not leak correct answers", allPlannedOptions.none { it.isMarkedCorrectInStudyMode })
+        assertTrue("Exam mode plan must include Answer Key Table", examPlan.answerKeyRows.isNotEmpty())
+        assertTrue("Exam mode plan must include Grouped Explanations section", examPlan.explanationItems.isNotEmpty())
+        assertTrue("Answer key rows must have at most 5 pairs per row", examPlan.answerKeyRows.all { it.pairs.size <= 5 })
+        assertTrue("Exam mode Answer Key Table must start on a separate page after question pages", examPlan.answerKeyStartPage == examPlan.questionPages.size + 1)
+        assertTrue("Exam mode Grouped Explanations must start on a separate page after the Answer Key Table", examPlan.explanationsStartPage > examPlan.answerKeyStartPage)
+        assertTrue("Total pages must include question pages + key page(s) + explanation page(s)", examPlan.totalPageCount >= examPlan.explanationsStartPage)
 
         val studyPlan = MedoPdfEngine.createPlan(qs10, PdfExportConfig(mode = PdfExportMode.STUDY))
         val studyOptions = studyPlan.questionPages.flatten().flatMap { it.options }
@@ -296,10 +346,15 @@ class ExampleUnitTest {
         val samplesDir = File("../docs/samples").apply { mkdirs() }
         val examPdfFile = File(samplesDir, "sample-exam-mode.pdf")
         val studyPdfFile = File(samplesDir, "sample-study-mode.pdf")
-        MedoPdfEngine.renderToFile(context, seed.questions, PdfExportConfig(mode = PdfExportMode.EXAM), examPdfFile)
-        MedoPdfEngine.renderToFile(context, seed.questions, PdfExportConfig(mode = PdfExportMode.STUDY), studyPdfFile)
+        val examSummary = MedoPdfEngine.renderToFile(context, seed.questions, PdfExportConfig(mode = PdfExportMode.EXAM), examPdfFile)
+        val studySummary = MedoPdfEngine.renderToFile(context, seed.questions, PdfExportConfig(mode = PdfExportMode.STUDY), studyPdfFile)
+
         assertTrue(examPdfFile.exists() && examPdfFile.length() > 100)
         assertTrue(studyPdfFile.exists() && studyPdfFile.length() > 100)
+        assertTrue("Exam mode Answer Key Table must start on a separate page after question pages", examSummary.answerKeyStartPage == examSummary.questionPages.size + 1)
+        assertTrue("Exam mode Grouped Explanations must start on a separate page after the Answer Key Table", examSummary.explanationsStartPage > examSummary.answerKeyStartPage)
+        assertTrue("Total pages must include question pages + key page(s) + explanation page(s)", examSummary.totalPageCount >= examSummary.explanationsStartPage)
+        assertTrue(studySummary.totalPageCount >= studySummary.explanationsStartPage)
     }
 
     // 10. ClozeGenerator, TrapDetector & Deterministic Lesson Fact Extractor (Medical Data Safety)
@@ -311,14 +366,11 @@ class ExampleUnitTest {
         assertTrue(TrapDetector.isTrapQuestion(correctOptionIndex = 2, optionVotes = listOf(10, 58, 27, 5)))
         assertFalse(TrapDetector.isTrapQuestion(correctOptionIndex = 1, optionVotes = listOf(15, 70, 10, 5)))
 
-        // Medical Data Safety (Section B):
-        // 1. All demo questions are explicitly labelled [نمونه آزمایشی] and have zero model drugSafetyMetaJson
         assertTrue(seed.questions.all { it.stemHtml.contains(SyntheticBankSeedAndImporter.DEMO_LABEL) })
         assertTrue(seed.questions.all { it.drugSafetyMetaJson == null })
-        // 2. Release build never seeds demo data
         assertFalse(SyntheticBankSeedAndImporter.shouldSeedDemoData(isDebugBuild = false))
         assertTrue(SyntheticBankSeedAndImporter.shouldSeedDemoData(isDebugBuild = true))
-        // 3. Deterministic extractor extracts only when table/sentence exists in lessonHtml and cites source
+
         val extracted = DeterministicLessonExtractor.extractFromLessonHtml("q_1001", seed.questions.first().lessonHtml)
         assertNotNull(extracted)
         assertTrue(extracted!!.extractedRows.all { it.verbatimSourceSnippet.contains("q_1001") })
@@ -339,21 +391,17 @@ class ExampleUnitTest {
             val height = 260
             val yPlane = renderQrToYPlane(url, width, height, inverted = false)
 
-            // Normal 0 deg
             assertEquals(url, MedoQrAndLanEngine.decodeYuvFrame(yPlane, width, height, width, 1, 0))
 
-            // Rotated 90, 180, 270 deg (even if camera reports 0 deg, fallback rotations must decode it)
             val (rot90, w90, h90) = MedoQrAndLanEngine.rotateYPlane(yPlane, width, height, 90)
             assertEquals(url, MedoQrAndLanEngine.decodeYuvFrame(rot90, w90, h90, w90, 1, 0))
 
             val (rot180, w180, h180) = MedoQrAndLanEngine.rotateYPlane(yPlane, width, height, 180)
             assertEquals(url, MedoQrAndLanEngine.decodeYuvFrame(rot180, w180, h180, w180, 1, 0))
 
-            // Inverted QR (white on black background)
             val invertedY = renderQrToYPlane(url, width, height, inverted = true)
             assertEquals(url, MedoQrAndLanEngine.decodeYuvFrame(invertedY, width, height, width, 1, 0))
 
-            // Row stride padding (e.g. rowStride = width + 48, pixelStride = 2)
             val paddedStride = (width * 2) + 48
             val paddedBuffer = ByteArray(paddedStride * height) { 0x7F.toByte() }
             for (y in 0 until height) {
@@ -363,24 +411,83 @@ class ExampleUnitTest {
             }
             assertEquals(url, MedoQrAndLanEngine.decodeYuvFrame(paddedBuffer, width, height, paddedStride, 2, 0))
 
-            // Salt-and-pepper sensor noise + 3x3 box blur
             val noisyBlurred = applyNoiseAndBoxBlur(yPlane, width, height)
             assertEquals(url, MedoQrAndLanEngine.decodeYuvFrame(noisyBlurred, width, height, width, 1, 0))
         }
     }
 
-    // 12. LAN Address Validator & Persian Error Mapper Test
+    // 12. LAN Address Validator, Fake `medo share` HTTP Server & Persian Error Mapper Test (Follow-Up 2 Item 2 & 6)
     @Test
-    fun `LAN URL validator accepts private LAN ranges and rejects public internet hosts and maps Persian errors`() {
+    fun `LAN URL validator fake medo share server protocol and Persian error mapper work`() {
+        assertTrue(MedoQrAndLanEngine.TRANSFER_VERIFICATION_NOTE.contains("unverified against the real server", ignoreCase = true))
         assertTrue(MedoQrAndLanEngine.validateLanTransferUrl("http://192.168.1.100:8765?token=123") is MedoQrAndLanEngine.LanValidationResult.Valid)
         assertTrue(MedoQrAndLanEngine.validateLanTransferUrl("10.24.0.5:8080", "4567") is MedoQrAndLanEngine.LanValidationResult.Valid)
         assertTrue(MedoQrAndLanEngine.validateLanTransferUrl("http://172.20.1.9:8765") is MedoQrAndLanEngine.LanValidationResult.Valid)
         assertTrue(MedoQrAndLanEngine.validateLanTransferUrl("http://localhost:8765") is MedoQrAndLanEngine.LanValidationResult.Valid)
 
-        // Reject public IPs and external domains
+        // Reject public IPs and external domains (Cleartext guard in code)
         assertTrue(MedoQrAndLanEngine.validateLanTransferUrl("http://8.8.8.8:8765") is MedoQrAndLanEngine.LanValidationResult.Invalid)
         assertTrue(MedoQrAndLanEngine.validateLanTransferUrl("http://172.32.0.1:8765") is MedoQrAndLanEngine.LanValidationResult.Invalid)
         assertTrue(MedoQrAndLanEngine.validateLanTransferUrl("https://example.com/packs") is MedoQrAndLanEngine.LanValidationResult.Invalid)
+
+        // Spin up a local Fake `medo share` Server on 127.0.0.1:0 (replicates desktop medo/share.py)
+        val seed = SyntheticBankSeedAndImporter.buildInitialClinicalSeed()
+        val zipBytes = SyntheticBankSeedAndImporter.buildMedoV2ZipBytes(seed)
+        ServerSocket(0, 5, InetAddress.getByName("127.0.0.1")).use { serverSocket ->
+            val port = serverSocket.localPort
+            val serverThread = thread(start = true) {
+                repeat(2) {
+                    try {
+                        serverSocket.accept().use { client ->
+                            val reader = client.getInputStream().bufferedReader()
+                            val requestLine = reader.readLine() ?: return@use
+                            while (true) {
+                                val h = reader.readLine() ?: break
+                                if (h.isEmpty()) break
+                            }
+                            val path = requestLine.split(" ").getOrNull(1) ?: "/"
+                            val out = client.getOutputStream()
+                            when {
+                                path == "/" || path == "/index.html" -> {
+                                    val html = """
+                                        <!DOCTYPE html>
+                                        <html dir="rtl"><head><meta charset="utf-8"></head>
+                                        <body>
+                                          <h1>انتقال آفلاین مدو</h1>
+                                          <a href="/bank.medo">دانلود فایل بانک سوالات (bank.medo)</a>
+                                        </body></html>
+                                    """.trimIndent().toByteArray(Charsets.UTF_8)
+                                    val headers = "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${html.size}\r\n\r\n"
+                                    out.write(headers.toByteArray(Charsets.UTF_8))
+                                    out.write(html)
+                                }
+                                path.startsWith("/bank.medo") -> {
+                                    val headers = "HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: ${zipBytes.size}\r\n\r\n"
+                                    out.write(headers.toByteArray(Charsets.UTF_8))
+                                    out.write(zipBytes)
+                                }
+                                else -> {
+                                    val msg = "404 Not Found".toByteArray(Charsets.UTF_8)
+                                    val headers = "HTTP/1.0 404 Not Found\r\nContent-Length: ${msg.size}\r\n\r\n"
+                                    out.write(headers.toByteArray(Charsets.UTF_8))
+                                    out.write(msg)
+                                }
+                            }
+                            out.flush()
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+
+            // Connect to root URL http://127.0.0.1:port -> client fetches HTML landing page, discovers /bank.medo, and downloads the v2 ZIP
+            val validation = MedoQrAndLanEngine.validateLanTransferUrl("http://127.0.0.1:$port")
+            assertTrue(validation is MedoQrAndLanEngine.LanValidationResult.Valid)
+            val downloadedBytes = MedoQrAndLanEngine.downloadBankFromLanServer("http://127.0.0.1:$port").getOrThrow()
+            val importedSeed = SyntheticBankSeedAndImporter.parseMedoV2ZipBytes(downloadedBytes)
+            assertEquals(seed.questions.size, importedSeed.questions.size)
+            serverThread.join(2000)
+        }
 
         // Error mapping checks
         val firewallErr = MedoQrAndLanEngine.mapTransferError(throwable = ConnectException("Connection refused"))
@@ -403,24 +510,69 @@ class ExampleUnitTest {
         assertEquals(MedoQrAndLanEngine.TransferErrorKind.INSUFFICIENT_STORAGE, spaceErr.kind)
     }
 
-    // 13. 20,000-Question Synthetic Bank Benchmark Test
+    // 13. Real Room/SQLite File Database 20,000-Question Benchmark with Lazy Lesson HTML Loading (Follow-Up 2 Item 4)
     @Test
-    fun `benchmark 20000 synthetic question bank generation search and tree flatten`() {
-        val runtime = Runtime.getRuntime()
-        val startGen = System.currentTimeMillis()
-        val bank20k = SyntheticBankSeedAndImporter.generateSyntheticLargeBank(20_000)
-        val genMs = (System.currentTimeMillis() - startGen).coerceAtLeast(1L)
-        assertEquals(20_000, bank20k.size)
+    fun `benchmark 20000 question bank through real Room SQLite file database with lazy lesson HTML under 150 MB`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val dbFile = File(context.cacheDir, "medo_benchmark_20k.db")
+        if (dbFile.exists()) dbFile.delete()
 
-        val startSearch = System.currentTimeMillis()
-        val qNorm = PersianTextUtils.normalizeForSearch("کلیدواژه ویژه بنچمارک")
-        val matches = bank20k.filter { it.normalizedSearchText.contains(qNorm) }
-        val searchMs = (System.currentTimeMillis() - startSearch).coerceAtLeast(1L)
-        assertEquals(40, matches.size)
-        assertTrue("Search on 20k bank took ${searchMs}ms (> 300ms)", searchMs < 300L)
+        val db = Room.databaseBuilder(context, MedoDatabase::class.java, dbFile.absolutePath)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao = db.medoDao()
+            val runtime = Runtime.getRuntime()
+            System.gc()
 
-        val usedMemMb = (runtime.totalMemory() - runtime.freeMemory()) / (1024L * 1024L)
-        println("BENCHMARK_20K: genMs=$genMs, searchMs=$searchMs, usedMemMb=$usedMemMb")
+            // 1. Real SQLite file import of 20,000 questions (chunked transactions of 2,000 rows)
+            val importTimeMs = SyntheticBankSeedAndImporter.import20kSyntheticBankIntoSqlite(dao, 20_000)
+            assertEquals(20_000, dao.getQuestionCount())
+
+            // 2. Home-tree load + lightweight question list (lessonHtml is NULL in list rows!)
+            val tHomeStart = System.currentTimeMillis()
+            val nodes = dao.getAllCategoryNodes()
+            val lightweightQuestions = dao.getAllQuestionsLightweight()
+            val nodeCounts = nodes.associate { it.id to it.totalBankQuestionsCount }
+            val flattenedHome = CategoryTreeFlattener.flattenTree(
+                allNodes = nodes,
+                expandedNodeIds = nodes.map { it.id }.toSet(),
+                onlyDownloadedTab = true,
+                nodeQuestionCounts = nodeCounts,
+                nodeAnsweredCounts = emptyMap()
+            )
+            val homeTreeLoadMs = (System.currentTimeMillis() - tHomeStart).coerceAtLeast(1L)
+            assertEquals(20_000, lightweightQuestions.size)
+            assertTrue("Lightweight list query must NOT load lessonHtml into memory", lightweightQuestions.all { it.lessonHtml == null })
+            assertTrue(flattenedHome.isNotEmpty())
+
+            // 3. Real SQLite indexed/normalized search across 20,000 rows
+            val tSearchStart = System.currentTimeMillis()
+            val qNorm = PersianTextUtils.normalizeForSearch("کلیدواژه ویژه بنچمارک")
+            val searchHits = dao.searchQuestions(qNorm)
+            val sqlSearchMs = (System.currentTimeMillis() - tSearchStart).coerceAtLeast(1L)
+            assertEquals(40, searchHits.size)
+            assertTrue("SQLite search on 20k bank took ${sqlSearchMs}ms (> 300ms)", sqlSearchMs < 300L)
+
+            // 4. Lazy per-question lessonHtml load from SQLite when user opens Lesson Reader
+            val tLessonStart = System.currentTimeMillis()
+            val lazyLessonHtml = dao.getLessonHtmlById("q_bench_1")
+            val lazyLessonLoadMs = (System.currentTimeMillis() - tLessonStart).coerceAtLeast(1L)
+            assertNotNull("Lazy lesson HTML query must return the stored lesson for q_bench_1", lazyLessonHtml)
+            assertTrue(lazyLessonHtml!!.contains("درسنامه جامع"))
+
+            System.gc()
+            val peakHeapMb = (runtime.totalMemory() - runtime.freeMemory()) / (1024L * 1024L)
+            println(
+                "REAL_SQLITE_BENCHMARK_20K: importMs=$importTimeMs, homeTreeLoadMs=$homeTreeLoadMs, " +
+                    "sqlSearchMs=$sqlSearchMs, lazyLessonLoadMs=$lazyLessonLoadMs, " +
+                    "dbFileSizeKb=${dbFile.length() / 1024L}, peakHeapMb=$peakHeapMb"
+            )
+            assertTrue("Peak heap ($peakHeapMb MB) must stay well under 150 MB", peakHeapMb < 150L)
+        } finally {
+            db.close()
+            dbFile.delete()
+        }
     }
 
     private fun renderQrToYPlane(content: String, width: Int, height: Int, inverted: Boolean): ByteArray {
@@ -445,12 +597,10 @@ class ExampleUnitTest {
 
     private fun applyNoiseAndBoxBlur(yBytes: ByteArray, width: Int, height: Int): ByteArray {
         val noisy = yBytes.copyOf()
-        // Deterministic sparse noise every 97th pixel
         for (i in noisy.indices step 97) {
             val v = noisy[i].toInt() and 0xFF
             noisy[i] = (if (v > 128) 60 else 200).toByte()
         }
-        // Mild 3x3 weighted box blur
         val out = ByteArray(width * height)
         for (y in 0 until height) {
             for (x in 0 until width) {
